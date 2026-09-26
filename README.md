@@ -17,13 +17,13 @@ The server can read the history of every chat the producer shares with it. A cha
 
 The server cannot ask a producer to call arbitrary Telegram methods or Discord routes. It can only send these requests, and every one of them is checked against your filter rules before anything is called:
 
-| Request              | Telegram | Discord | What it does                                                                                                                                                          |
-| -------------------- | -------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CHATS_FETCH`        | yes      | yes     | Lists the chats the account can see, after filtering. Sent on connect and every 30 minutes.                                                                           |
-| `MESSAGES_FETCH`     | yes      | yes     | Reads up to 100 messages from one chat, by id or as one page of history.                                                                                              |
-| `MEDIA_FETCH`        | yes      | yes     | Downloads one file and uploads it to a presigned URL the server provides.                                                                                             |
-| `ATTACHMENT_REFRESH` | no       | yes     | Re-signs one expired Discord CDN URL.                                                                                                                                 |
-| `PROBE`              | yes      | yes     | Health check: returns the server's token unchanged to show the producer is answering requests. Reads nothing from your account and makes no Telegram or Discord call. |
+| Request              | Telegram | Discord | What it does                                                                                                                                                                                     |
+| -------------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `CHATS_FETCH`        | yes      | yes     | Lists the chats the account can see, after filtering. Sent on connect and every 30 minutes.                                                                                                      |
+| `MESSAGES_FETCH`     | yes      | yes     | Reads up to 100 messages from one chat, by id or as one page of history.                                                                                                                         |
+| `MEDIA_FETCH`        | yes      | yes     | Downloads one file and uploads it to a presigned URL the server provides.                                                                                                                        |
+| `ATTACHMENT_REFRESH` | no       | yes     | Re-signs one expired Discord CDN URL.                                                                                                                                                            |
+| `PROBE`              | yes      | yes     | Health check: the server sends a random string and the producer sends it straight back, to show it is answering requests. Reads nothing from your account and makes no Telegram or Discord call. |
 
 Telegram `MEDIA_FETCH` only accepts document, photo and chat photo locations, and Discord `MEDIA_FETCH` only downloads from Discord CDN hosts. Anything else is refused without a call.
 
