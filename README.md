@@ -10,10 +10,10 @@ A producer logs in as your account, sends the chats you choose to a Telecord ser
 
 <br />
 
-[![Telegram](https://img.shields.io/badge/telegram-mtcute-0b9981?style=for-the-badge&labelColor=0c0c0c)](#supported-libraries)
-[![Discord](https://img.shields.io/badge/discord-selfbot-0b9981?style=for-the-badge&labelColor=0c0c0c)](#supported-libraries)
-[![Images](https://img.shields.io/badge/images-cosign%20signed-0b9981?style=for-the-badge&labelColor=0c0c0c)](#security)
-[![Node](https://img.shields.io/badge/node-24-0b9981?style=for-the-badge&labelColor=0c0c0c)](#local-development)
+[![Telegram](https://img.shields.io/badge/Telegram-0b9981?style=for-the-badge&logo=telegram&logoColor=white)](#supported-libraries)
+[![Discord](https://img.shields.io/badge/Discord-0b9981?style=for-the-badge&logo=discord&logoColor=white)](#supported-libraries)
+[![TypeScript](https://img.shields.io/badge/TypeScript-0b9981?style=for-the-badge&logo=typescript&logoColor=white)](#local-development)
+[![Docker](https://img.shields.io/badge/Docker-0b9981?style=for-the-badge&logo=docker&logoColor=white)](#quick-start)
 
 **[Quick start](#quick-start)** · [Filters](#filters) · [Updates](#updates) · [FAQ](#faq)
 
