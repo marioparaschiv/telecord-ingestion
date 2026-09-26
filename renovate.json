@@ -1,0 +1,11 @@
+{
+	"$schema": "https://docs.renovatebot.com/renovate-schema.json",
+	"extends": ["config:recommended"],
+	"packageRules": [
+		{
+			"description": "Takes effect once @telecord/ingest-client is published to npm; Renovate skips the vendored file: tarball.",
+			"matchPackageNames": ["@telecord/ingest-client"],
+			"labels": ["ingest-client"]
+		}
+	]
+}

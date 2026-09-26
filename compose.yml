@@ -1,0 +1,39 @@
+x-hardening: &hardening
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
+    restart: unless-stopped
+
+services:
+    telegram:
+        <<: *hardening
+        image: ghcr.io/marioparaschiv/telecord-ingestion-telegram:latest
+        env_file: telegram.env
+        volumes:
+            - telegram-data:/data
+        labels:
+            telecord-ingestion.autoupdate: 'true'
+
+    discord:
+        <<: *hardening
+        image: ghcr.io/marioparaschiv/telecord-ingestion-discord:latest
+        env_file: discord.env
+        labels:
+            telecord-ingestion.autoupdate: 'true'
+
+    updater:
+        <<: *hardening
+        image: ghcr.io/marioparaschiv/telecord-ingestion-updater:latest
+        init: true
+        environment:
+            COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME}
+            CHECK_INTERVAL: ${CHECK_INTERVAL:-24h}
+            UPDATE_DELAY: ${UPDATE_DELAY:-0}
+        volumes:
+            - /var/run/docker.sock:/var/run/docker.sock
+            # Recreating a service goes through this compose file, so the updated container keeps its configuration.
+            - .:/project:ro
+
+volumes:
+    telegram-data:

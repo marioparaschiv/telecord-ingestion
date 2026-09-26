@@ -1,0 +1,93 @@
+name: Release
+
+on:
+    push:
+        tags:
+            - 'telegram-v*'
+            - 'discord-v*'
+            - 'updater-v*'
+
+permissions:
+    contents: read
+    id-token: write
+    packages: write
+
+jobs:
+    release:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+
+            - name: Resolve the image from the tag
+              id: target
+              env:
+                  TAG: ${{ github.ref_name }}
+              run: |
+                  name="${TAG%%-v*}"
+                  version="${TAG#*-v}"
+
+                  if ! echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+                    echo "::error::$TAG does not end in a semantic version"
+                    exit 1
+                  fi
+
+                  case "$name" in
+                    telegram | discord)
+                      context=.
+                      dockerfile="producers/$name/Dockerfile"
+                      ;;
+                    updater)
+                      context=updater
+                      dockerfile=updater/Dockerfile
+                      ;;
+                    *)
+                      echo "::error::$TAG names no image"
+                      exit 1
+                      ;;
+                  esac
+
+                  {
+                    echo "image=ghcr.io/${GITHUB_REPOSITORY}-$name"
+                    echo "version=$version"
+                    echo "context=$context"
+                    echo "dockerfile=$dockerfile"
+                  } >> "$GITHUB_OUTPUT"
+
+            - uses: docker/setup-buildx-action@v4
+
+            - uses: docker/login-action@v4
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Build and push
+              id: build
+              uses: docker/build-push-action@v7
+              with:
+                  context: ${{ steps.target.outputs.context }}
+                  file: ${{ steps.target.outputs.dockerfile }}
+                  push: true
+                  provenance: mode=max
+                  sbom: true
+                  tags: |
+                      ${{ steps.target.outputs.image }}:${{ steps.target.outputs.version }}
+                      ${{ steps.target.outputs.image }}:latest
+
+            # Must match the cosign that the updater image installs, so both read the same bundle format.
+            - uses: sigstore/cosign-installer@v4.1.2
+              with:
+                  cosign-release: v3.0.6
+
+            - name: Sign the image
+              env:
+                  IMAGE: ${{ steps.target.outputs.image }}@${{ steps.build.outputs.digest }}
+              run: cosign sign --yes "$IMAGE"
+
+            - name: Verify the signature as the updater will
+              env:
+                  IMAGE: ${{ steps.target.outputs.image }}@${{ steps.build.outputs.digest }}
+              run: |
+                  cosign verify "$IMAGE" \
+                    --certificate-identity-regexp '^https://github\.com/marioparaschiv/telecord-ingestion/\.github/workflows/release\.yml@refs/tags/.*$' \
+                    --certificate-oidc-issuer https://token.actions.githubusercontent.com
