@@ -1,21 +1,63 @@
 # telecord-ingestion
 
-Reference producers for the Telecord ingest protocol. A producer logs in as your own Telegram or Discord account, forwards a fixed set of raw events to a Telecord ingest server and answers a fixed set of requests from it. You run the producer; the server only ever sees what the producer sends.
+```sh
+docker compose run --rm telegram   # log in once
+docker compose up -d               # then run everything
+```
 
-- `producers/telegram`: an MTProto client on [mtcute](https://github.com/mtcute/mtcute).
-- `producers/discord`: a gateway client on a fork of discord.js-selfbot-v13.
-- `packages/producer-core`: the connection, delivery buffer, filter rules and request plumbing both share.
-- `updater`: the sidecar that keeps the producer containers on signed releases.
+Reference producers for the Telecord ingest protocol. A producer logs in as your own Telegram or Discord account, sends a fixed set of events to a Telecord ingest server and answers a fixed set of requests from it. You run the producer, so the server only sees what the producer sends.
 
-The wire protocol is specified in `SPEC-telegram.md` and `SPEC-discord.md` inside the `@telecord/ingest-client` package.
+## At a glance
+
+- **You choose what is shared.** Filter rules decide which chats the server sees. DMs are off by default.
+- **The server can read history of shared chats**, not only new messages. Deny a chat to keep it out.
+- **The request set is fixed.** A short list of request types, all checked against your filters. No arbitrary API calls.
+- **Images are signed and locked down.** Non-root, read-only, no capabilities, built only by the release workflow.
+- **Updates are automatic and verified.** The updater only swaps to images whose signature checks out.
+
+## Contents
+
+1. [Quick start](#quick-start)
+2. [What the server can see](#what-the-server-can-see)
+3. [Filters](#filters)
+4. [Configuration](#configuration)
+5. [Security](#security)
+6. [Updates](#updates)
+7. [Supported libraries](#supported-libraries)
+8. [FAQ](#faq)
+9. [Local development](#local-development)
+
+## Quick start
+
+1. Put `compose.yml` in a directory.
+2. Create `telegram.env` and `discord.env` next to it (see [Configuration](#configuration)).
+3. Log in to Telegram once. Answer the phone, code and 2FA prompts, wait for `Logged in to Telegram`, then press Ctrl+C:
+
+    ```sh
+    docker compose run --rm telegram
+    ```
+
+4. Start everything:
+
+    ```sh
+    docker compose up -d
+    ```
+
+Only running one platform? Delete the other service from `compose.yml`.
 
 ## What the server can see
 
-The server can read the history of every chat the producer shares with it. A chat is shared when it appears in a chat snapshot, which means your filter rules allow it. For a shared chat the server can page through past messages with `MESSAGES_FETCH` and download its media with `MEDIA_FETCH`, not just receive new events. If a chat must stay private, deny it in `FILTER_RULES`; a denied chat is left out of snapshots and every request for it is declined without calling Telegram or Discord.
+A chat is shared when your filter rules allow it. For a shared chat, the server can:
 
-## The fixed request set
+- receive new, edited and deleted messages, reactions, and chat, channel, guild, role and own-membership changes;
+- page through past messages;
+- download its media.
 
-The server cannot ask a producer to call arbitrary Telegram methods or Discord routes. It can only send these requests, and every one of them is checked against your filter rules before anything is called:
+Nothing else your account receives is sent. A denied chat is left out entirely, and any request for it is declined without calling Telegram or Discord.
+
+### The fixed request set
+
+These are the only requests the server can send:
 
 | Request              | Telegram | Discord | What it does                                                                                |
 | -------------------- | -------- | ------- | ------------------------------------------------------------------------------------------- |
@@ -25,24 +67,37 @@ The server cannot ask a producer to call arbitrary Telegram methods or Discord r
 | `ATTACHMENT_REFRESH` | no       | yes     | Re-signs one expired Discord CDN URL.                                                       |
 | `PROBE`              | yes      | yes     | Checks the producer is connected and responding.                                            |
 
-Telegram `MEDIA_FETCH` only accepts document, photo and chat photo locations, and Discord `MEDIA_FETCH` only downloads from Discord CDN hosts. Anything else is refused without a call.
+Telegram `MEDIA_FETCH` only accepts document, photo and chat photo locations. Discord `MEDIA_FETCH` only downloads from Discord CDN hosts. Anything else is refused.
 
-The forwarded events are fixed too: new, edited and deleted messages, reactions, and chat, channel, guild, role and own-membership changes. Nothing else your account receives is sent.
+The wire protocol is specified in `SPEC-telegram.md` and `SPEC-discord.md` inside the `@telecord/ingest-client` package.
 
-## Supported libraries
+## Filters
 
-| Producer | Library                                                                                                                                         | Speaks                |
-| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
-| Telegram | `@mtcute/node` 0.32.3                                                                                                                           | the TL layer it ships |
-| Discord  | `discord.js-selfbot-v13`, pinned to commit `3e6baf2` of [marioparaschiv/FORK.Discord.Self](https://github.com/marioparaschiv/FORK.Discord.Self) | gateway API version 9 |
+Default rules keep private chats out:
 
-TDLib is not supported, and neither are the official apps. The protocol forwards raw TL payloads, and TDLib never exposes them. Other MTProto libraries that read and write raw TL (GramJS, Telethon, Pyrogram, gotd and others) can implement the protocol, but only mtcute ships here.
+- Telegram: `[{"action":"deny","peerType":"user"}]`
+- Discord: `[{"action":"deny","type":["dm","group_dm"]}]`
 
-## Deployment
+How rules work:
 
-### Configuration
+1. Rules are checked in order. The first match decides.
+2. A rule is an `action` (`allow` or `deny`) plus fields to match. Each field takes one value or a list.
+3. If nothing matches, `FILTER_DEFAULT` decides (`allow` unless you change it).
+4. The same rules apply to events, chat lists and every request.
 
-Each producer reads its configuration from the environment. The compose file loads `telegram.env` and `discord.env` from the same directory.
+Fields you can match on:
+
+- **Telegram:** `peerType` (`user`, `group`, `channel`), `peerId`, `update` (the update constructor). `peerId` is the marked id: a user as is, a basic group as `-<id>`, a channel as `-100<id>`.
+- **Discord:** `type` (`dm`, `group_dm`, `guild`), `guildId`, `channelId`, `event` (the dispatch name).
+
+Example, share only one Telegram channel:
+
+```sh
+FILTER_RULES=[{"action":"allow","peerId":"-1001234567890"}]
+FILTER_DEFAULT=deny
+```
+
+## Configuration
 
 Both producers:
 
@@ -50,7 +105,7 @@ Both producers:
 | ---------------- | -------- | ---------- | -------------------------------------------------------------------------- |
 | `INGEST_URL`     | yes      |            | The ingest route, `wss://<host>/telegram/v1` or `wss://<host>/discord/v1`. |
 | `INGEST_API_KEY` | yes      |            | The API key the operator issued for this account.                          |
-| `FILTER_RULES`   | no       | DMs denied | A JSON list of ordered rules; the first rule that matches decides.         |
+| `FILTER_RULES`   | no       | DMs denied | A JSON list of ordered rules. See [Filters](#filters).                     |
 | `FILTER_DEFAULT` | no       | `allow`    | `allow` or `deny`, used when no rule matches.                              |
 
 Telegram only:
@@ -67,64 +122,34 @@ Discord only:
 | --------------- | -------- | ------- | -------------------- |
 | `DISCORD_TOKEN` | yes      |         | The account's token. |
 
-### Filters
+Updater (set in a `.env` file next to `compose.yml`):
 
-Private chats are not shared unless you say so. The default rules are:
+| Variable         | Default | Meaning                                                           |
+| ---------------- | ------- | ----------------------------------------------------------------- |
+| `CHECK_INTERVAL` | `24h`   | How often to look for a new release. Any `sleep` duration works.  |
+| `UPDATE_DELAY`   | `0`     | How long to wait after a verified release before switching to it. |
 
-- Telegram: `[{"action":"deny","peerType":"user"}]`
-- Discord: `[{"action":"deny","type":["dm","group_dm"]}]`
+## Security
 
-A rule is an `action` (`allow` or `deny`) plus any of the fields below; each field takes one value or a list, and every field a rule names must match.
+### Containers
 
-- Telegram: `peerType` (`user`, `group`, `channel`), `peerId` (the marked id: a user as is, a basic group as `-<id>`, a channel as `-100<id>`), `update` (the update constructor).
-- Discord: `type` (`dm`, `group_dm`, `guild`), `guildId`, `channelId`, `event` (the dispatch name).
+Both producers run with:
 
-For example, to share only one Telegram channel:
+- a non-root user (uid 1000);
+- a read-only root filesystem;
+- no Linux capabilities, and `no-new-privileges`;
+- `tmpfs` at `/tmp`, cleared on restart;
+- for Telegram only, a `/data` volume holding the session. Discord stores nothing.
 
-```sh
-FILTER_RULES=[{"action":"allow","peerId":"-1001234567890"}]
-FILTER_DEFAULT=deny
-```
+### Images
 
-The same rules apply to forwarded events, chat snapshots and every request.
+Images are built only by `.github/workflows/release.yml`, only from a `telegram-v*`, `discord-v*` or `updater-v*` tag. Each image is:
 
-### Running with compose
-
-1. Put `compose.yml` in a directory and create `telegram.env` and `discord.env` next to it.
-2. Log in to Telegram once, interactively. The session is written to the `telegram-data` volume:
-
-    ```sh
-    docker compose run --rm telegram
-    ```
-
-    Answer the phone, code and 2FA prompts, wait for `Logged in to Telegram`, then stop it with Ctrl+C.
-
-3. Start everything:
-
-    ```sh
-    docker compose up -d
-    ```
-
-Drop the `discord` or `telegram` service from `compose.yml` if you only run one.
-
-### How the deployment is secured
-
-The compose file runs both producers with:
-
-- a non-root user (uid 1000) baked into the image;
-- `read_only: true`, so the root filesystem cannot be written;
-- `cap_drop: [ALL]`, so the process holds no Linux capabilities;
-- `no-new-privileges`, so nothing inside can gain privileges through setuid binaries;
-- `tmpfs: [/tmp]` for scratch space, cleared on restart;
-- for Telegram, a named volume at `/data`, the only persistent writable path, holding the session. Discord keeps nothing and mounts no volume.
-
-The images are built only by the release workflow (`.github/workflows/release.yml`), and only from a `telegram-v*`, `discord-v*` or `updater-v*` tag. Each image is:
-
-- signed with [cosign](https://github.com/sigstore/cosign) keyless signing. The certificate names the workflow and tag that built it, and the signature is logged in the public Rekor transparency log;
-- published with SLSA provenance (`mode=max`) describing how it was built;
+- signed with [cosign](https://github.com/sigstore/cosign) keyless signing, logged in the public Rekor transparency log;
+- published with SLSA provenance describing how it was built;
 - published with an SBOM listing its packages.
 
-To check an image yourself before running it:
+Check an image yourself (swap `telegram` for `discord` or `updater`):
 
 ```sh
 cosign verify ghcr.io/marioparaschiv/telecord-ingestion-telegram:latest \
@@ -132,7 +157,7 @@ cosign verify ghcr.io/marioparaschiv/telecord-ingestion-telegram:latest \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-Replace `telegram` with `discord` or `updater` for the other images. To read the provenance and SBOM:
+Read the provenance and SBOM:
 
 ```sh
 docker buildx imagetools inspect ghcr.io/marioparaschiv/telecord-ingestion-telegram:latest --format '{{ json .Provenance }}'
@@ -141,62 +166,86 @@ docker buildx imagetools inspect ghcr.io/marioparaschiv/telecord-ingestion-teleg
 
 ## Updates
 
-### Why updates are needed
+### Why they matter
 
-A producer that is never updated eventually stops working:
+A producer that is never updated stops working:
 
-- **Telegram TL layer drift.** Telegram changes its API schema in numbered layers. The server accepts a window of layers that moves up as its decoder does. A producer on an old mtcute falls below the window and is refused with `4003 VERSION_UNSUPPORTED`; the `HELLO` frame warns ahead of time with `deprecation`.
-- **Discord API version drift.** The server accepts gateway API versions 9 and 10 today. When Discord retires a version, or the server drops it, a producer still on it is refused the same way.
-- **Ingest protocol versions.** The protocol itself is versioned (`/telegram/v1`, `/discord/v1`). New routes and changes to the request set ship in new `@telecord/ingest-client` releases.
+- **Telegram layers.** Telegram versions its API in numbered layers. The server accepts a moving window of layers; fall below it and the connection is refused (`4003 VERSION_UNSUPPORTED`). The server warns ahead of time.
+- **Discord API versions.** The server accepts gateway versions 9 and 10 today. Retired versions get refused the same way.
+- **Protocol versions.** New protocol routes ship in new `@telecord/ingest-client` releases.
 
 ### How the updater works
 
-The `updater` service in `compose.yml` runs `updater/update.sh`:
+Every `CHECK_INTERVAL`, `updater/update.sh`:
 
-1. Every `CHECK_INTERVAL` (default `24h`) it lists the running containers of its own compose project that carry the label `telecord-ingestion.autoupdate=true`. Nothing else is touched; the updater does not carry the label and does not update itself.
-2. For each, it resolves the image tag (such as `:latest`) to a digest in the registry. If that digest is what the container runs, it moves on.
-3. Otherwise it runs `cosign verify` on that exact digest, requiring a certificate issued to `https://github.com/marioparaschiv/telecord-ingestion/.github/workflows/release.yml@refs/tags/...` by GitHub's OIDC issuer.
-4. If verification fails for any reason (no signature, wrong identity, registry error) it logs `REFUSED` and keeps the current container. The unverified image is never pulled, and the local tag is not moved.
-5. If verification passes, it pulls the image by digest, waits `UPDATE_DELAY` (default `0`), points the local tag at the verified digest and recreates the service with `docker compose up -d --no-deps <service>`. The compose directory is mounted read-only at `/project`, so the new container gets the same configuration and volumes.
+1. Finds running containers in its compose project labelled `telecord-ingestion.autoupdate=true`.
+2. Looks up the latest image digest. If nothing changed, it stops there.
+3. Runs `cosign verify` on that digest, requiring the release workflow's signature.
+4. **If verification fails**, logs `REFUSED` and leaves the container alone. The image is never pulled.
+5. **If it passes**, pulls the image, waits `UPDATE_DELAY`, and recreates the service with the same config and volumes.
 
-`CHECK_INTERVAL` and `UPDATE_DELAY` accept any duration `sleep` does, such as `30m`, `6h` or `1d`. Set them in a `.env` file next to `compose.yml`. A delay gives you time to notice a bad release before it reaches you.
+Control it:
 
-To pin a producer to one release, set its `image:` to a digest (`...-telegram@sha256:...`); the updater skips digest-pinned images. To stop updates altogether, remove the label or the `updater` service.
-
-Update the updater itself by hand:
-
-```sh
-docker compose pull updater && docker compose up -d updater
-```
+- **Pin a release:** set `image:` to a digest (`...-telegram@sha256:...`). Pinned images are skipped.
+- **Turn it off:** remove the label or the `updater` service.
+- **Update the updater itself:** `docker compose pull updater && docker compose up -d updater`.
 
 ### The docker socket trade-off
 
-The updater has to pull images and recreate containers, so it mounts `/var/run/docker.sock`. Access to that socket is equivalent to root on the host: anything that controls the updater controls the machine. It runs with the same read-only root, no capabilities and `no-new-privileges` as the producers, but that does not limit what the socket allows. It runs as root inside its container because the socket's group id differs between hosts.
+The updater mounts `/var/run/docker.sock` to pull images and recreate containers. That socket is equivalent to root on the host. The updater runs locked down like the producers, but that does not limit what the socket allows.
 
-If that is not acceptable, remove the `updater` service and update by hand: verify the new image with the `cosign verify` command above, then `docker compose pull && docker compose up -d`.
+If that is not acceptable, remove the `updater` service and update by hand: run the `cosign verify` command above, then `docker compose pull && docker compose up -d`.
+
+## Supported libraries
+
+| Producer | Library                                                                                                                                         | Speaks                |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| Telegram | `@mtcute/node` 0.32.3                                                                                                                           | the TL layer it ships |
+| Discord  | `discord.js-selfbot-v13`, pinned to commit `3e6baf2` of [marioparaschiv/FORK.Discord.Self](https://github.com/marioparaschiv/FORK.Discord.Self) | gateway API version 9 |
+
+TDLib and the official apps are not supported: the protocol sends raw TL payloads, and TDLib never exposes them. Other MTProto libraries that handle raw TL (GramJS, Telethon, Pyrogram, gotd) could implement the protocol, but only mtcute ships here.
+
+## FAQ
+
+**Which of my chats does the server get?**
+Only the ones your filter rules allow. DMs are off by default. See [Filters](#filters).
+
+**Can the server read old messages?**
+Yes, for shared chats. It can page through history and download media. Deny a chat to keep it out completely.
+
+**Do I have to run both producers?**
+No. Delete the service you don't need from `compose.yml`.
+
+**What if I don't update?**
+It keeps working until the server stops accepting your Telegram layer or Discord API version, then the connection is refused.
+
+**Can I turn off automatic updates?**
+Yes. Remove the `updater` service, or pin the image to a digest. See [Updates](#updates).
+
+**Why not TDLib?**
+TDLib never exposes the raw TL payloads the protocol forwards.
 
 ## Local development
 
-Requires Node.js 24.14.1 or later within 24 and pnpm 12.
+Requires Node.js 24 (24.14.1 or later) and pnpm 12.
 
 ```sh
 pnpm install
 pnpm build          # producer-core and both producers
-pnpm test           # the vitest suites
+pnpm test
 pnpm typecheck
 pnpm lint
 pnpm format:check
 ```
 
-To run a producer against a local ingest server, build it and pass an env file; use a local `DATA_DIR` for the Telegram session:
+Run a producer against a local ingest server:
 
 ```sh
-pnpm build
 DATA_DIR=./data node --env-file=telegram.env producers/telegram/dist/index.mjs
 node --env-file=discord.env producers/discord/dist/index.mjs
 ```
 
-To build an image locally, from the repository root:
+Build the images locally, from the repository root:
 
 ```sh
 docker build -f producers/telegram/Dockerfile -t telecord-ingestion-telegram .
