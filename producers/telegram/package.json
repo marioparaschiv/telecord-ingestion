@@ -13,7 +13,7 @@
 	},
 	"dependencies": {
 		"@mtcute/node": "catalog:",
-		"@telecord/ingest-client": "file:../../vendor/telecord-ingest-client-0.1.0.tgz",
+		"@telecord/ingest-client": "catalog:",
 		"@telecord/producer-core": "workspace:*",
 		"zod": "catalog:"
 	},
