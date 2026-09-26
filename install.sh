@@ -5,6 +5,7 @@
 set -eu
 
 SOURCE="${TELECORD_INGESTION_SOURCE:-https://raw.githubusercontent.com/marioparaschiv/telecord-ingestion/main}"
+BASE='wss://ingest.telecord.app'
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
 	BOLD=$(printf '\033[1m')
@@ -154,18 +155,8 @@ if [ -e "$DIR/.env" ] && ! confirm "$DIR already has an install. Overwrite its s
 	fail "Stopped without changes."
 fi
 
-step "4. Telecord server"
-
-say "  ${DIM}Your Telecord operator gives you the server address and one API key per account.${RESET}"
-ask SERVER "Server address, e.g. ingest.example.com"
-
-case "$SERVER" in
-	*://*) BASE="${SERVER%/}" ;;
-	*) BASE="wss://${SERVER%/}" ;;
-esac
-
 if [ "$TELEGRAM" = 1 ]; then
-	step "5. Telegram"
+	step "4. Telegram"
 
 	say "  ${DIM}Create an app at https://my.telegram.org to get an API id and hash.${RESET}"
 
@@ -183,13 +174,13 @@ if [ "$TELEGRAM" = 1 ]; then
 fi
 
 if [ "$DISCORD" = 1 ]; then
-	step "$((5 + TELEGRAM)). Discord"
+	step "$((4 + TELEGRAM)). Discord"
 
 	ask_secret DISCORD_TOKEN "Account token"
 	ask_secret DISCORD_KEY "Telecord API key for this account"
 fi
 
-step "$((5 + TELEGRAM + DISCORD)). Options"
+step "$((4 + TELEGRAM + DISCORD)). Options"
 
 say "  ${DIM}Direct messages are private by default. You can change this later in the .env files.${RESET}"
 

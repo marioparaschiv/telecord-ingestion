@@ -54,9 +54,9 @@ A producer logs in as your account and sends the chats you choose to a Telecord 
 curl -fsSL https://raw.githubusercontent.com/marioparaschiv/telecord-ingestion/main/install.sh | sh
 ```
 
-Takes about 5 minutes. You need Docker, and the API key your Telecord operator gave you.
+Takes about 5 minutes. You need Docker and a Telecord API key for each account.
 
-The installer asks which platforms to run, your server address and credentials, then logs you in to Telegram and starts everything. Settings go in `~/telecord-ingestion` unless you pick another directory.
+The installer asks which platforms to run and your credentials, then logs you in to Telegram and starts everything. Settings go in `~/telecord-ingestion` unless you pick another directory.
 
 Check it worked: `docker compose ps` in that directory shows each service as `running`.
 
@@ -72,7 +72,7 @@ Check it worked: `docker compose ps` in that directory shows each service as `ru
 3. Create `telegram.env`:
 
     ```sh
-    INGEST_URL=wss://<host>/telegram/v1
+    INGEST_URL=wss://ingest.telecord.app/telegram/v1
     INGEST_API_KEY=<your key>
     TELEGRAM_API_ID=<from my.telegram.org>
     TELEGRAM_API_HASH=<from my.telegram.org>
@@ -81,7 +81,7 @@ Check it worked: `docker compose ps` in that directory shows each service as `ru
 4. Create `discord.env`:
 
     ```sh
-    INGEST_URL=wss://<host>/discord/v1
+    INGEST_URL=wss://ingest.telecord.app/discord/v1
     INGEST_API_KEY=<your key>
     DISCORD_TOKEN=<your account token>
     ```
@@ -156,12 +156,12 @@ FILTER_RULES=[{"action":"deny","peerType":"user"},{"action":"deny","peerId":"-12
 
 ### Both producers
 
-| Variable         | Required | Default    | Meaning                                                 |
-| ---------------- | -------- | ---------- | ------------------------------------------------------- |
-| `INGEST_URL`     | yes      |            | `wss://<host>/telegram/v1` or `wss://<host>/discord/v1` |
-| `INGEST_API_KEY` | yes      |            | The key your operator issued for this account           |
-| `FILTER_RULES`   | no       | DMs denied | Ordered JSON rule list. See [Filters](#filters).        |
-| `FILTER_DEFAULT` | no       | `allow`    | `allow` or `deny`, used when no rule matches            |
+| Variable         | Required | Default    | Meaning                                                                           |
+| ---------------- | -------- | ---------- | --------------------------------------------------------------------------------- |
+| `INGEST_URL`     | yes      |            | `wss://ingest.telecord.app/telegram/v1` or `wss://ingest.telecord.app/discord/v1` |
+| `INGEST_API_KEY` | yes      |            | Your Telecord API key for this account                                            |
+| `FILTER_RULES`   | no       | DMs denied | Ordered JSON rule list. See [Filters](#filters).                                  |
+| `FILTER_DEFAULT` | no       | `allow`    | `allow` or `deny`, used when no rule matches                                      |
 
 ### Telegram
 
