@@ -50,10 +50,26 @@ A producer logs in as your account and sends the chats you choose to a Telecord 
 
 ## Quick start
 
+```sh
+curl -fsSL https://raw.githubusercontent.com/marioparaschiv/telecord-ingestion/main/install.sh | sh
+```
+
 Takes about 5 minutes. You need Docker, and the API key your Telecord operator gave you.
 
+The installer asks which platforms to run, your server address and credentials, then logs you in to Telegram and starts everything. Settings go in `~/telecord-ingestion` unless you pick another directory.
+
+Check it worked: `docker compose ps` in that directory shows each service as `running`.
+
+### Manual setup
+
 1. Copy `compose.yml` from this repo into an empty directory.
-2. Create `telegram.env` next to it:
+2. Create `.env` next to it, listing the services to run:
+
+    ```sh
+    COMPOSE_PROFILES=telegram,discord,updater
+    ```
+
+3. Create `telegram.env`:
 
     ```sh
     INGEST_URL=wss://<host>/telegram/v1
@@ -62,7 +78,7 @@ Takes about 5 minutes. You need Docker, and the API key your Telecord operator g
     TELEGRAM_API_HASH=<from my.telegram.org>
     ```
 
-3. Create `discord.env` next to it:
+4. Create `discord.env`:
 
     ```sh
     INGEST_URL=wss://<host>/discord/v1
@@ -70,21 +86,19 @@ Takes about 5 minutes. You need Docker, and the API key your Telecord operator g
     DISCORD_TOKEN=<your account token>
     ```
 
-4. Log in to Telegram once. Answer the phone, code and 2FA prompts. When you see `Logged in to Telegram`, press Ctrl+C.
+5. Log in to Telegram once. Answer the phone, code and 2FA prompts. When you see `Logged in to Telegram`, press Ctrl+C.
 
     ```sh
     docker compose run --rm telegram
     ```
 
-5. Start everything:
+6. Start everything:
 
     ```sh
     docker compose up -d
     ```
 
-Check it worked: `docker compose ps` shows each service as `running`.
-
-Only using one platform? Delete the other service from `compose.yml` and skip its env file.
+Only using one platform? Leave the other out of `COMPOSE_PROFILES` and skip its env file.
 
 ## Filters
 
@@ -188,7 +202,7 @@ Your rules replace the defaults. Add the DM rule back as the first rule. See [Re
 
 ### Do I have to run both producers?
 
-No. Delete the service you don't need from `compose.yml`.
+No. The installer asks which ones you want. For a manual setup, list only the ones you need in `COMPOSE_PROFILES`.
 
 ### How do I see what it's doing?
 
@@ -206,7 +220,7 @@ It keeps working until the server stops accepting your Telegram layer or Discord
 
 ### Can I turn off automatic updates?
 
-Yes. Remove the `updater` service, or pin the image to a digest. See [Controlling updates](#controlling-updates).
+Yes. Answer no in the installer, remove `updater` from `COMPOSE_PROFILES`, or pin the image to a digest. See [Controlling updates](#controlling-updates).
 
 ### Why not TDLib?
 
@@ -264,14 +278,14 @@ Once every `CHECK_INTERVAL` (default 24 hours), the updater:
 
 - **Delay rollout:** set `UPDATE_DELAY`, such as `2d`, to give yourself time to hear about a bad release.
 - **Pin a release:** set the service's `image:` to a digest (`...-telegram@sha256:...`). Pinned images are skipped.
-- **Turn it off:** remove the `updater` service, or the label from a service.
+- **Turn it off:** remove `updater` from `COMPOSE_PROFILES` in `.env`, or the label from a service.
 - **Update the updater:** `docker compose pull updater && docker compose up -d updater`.
 
 ### The Docker socket
 
 The updater needs `/var/run/docker.sock` to download images and restart containers. Access to that socket equals root on the host, however locked down the container is.
 
-Rather not grant that? Remove the `updater` service and update by hand:
+Rather not grant that? Remove `updater` from `COMPOSE_PROFILES` and update by hand:
 
 1. Verify the new image (see [Verify an image](#verify-an-image)).
 2. Run `docker compose pull && docker compose up -d`.

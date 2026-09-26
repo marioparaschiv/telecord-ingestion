@@ -1,3 +1,4 @@
+# Pick the services to run with COMPOSE_PROFILES in .env, e.g. COMPOSE_PROFILES=telegram,discord,updater
 x-hardening: &hardening
     read_only: true
     cap_drop: [ALL]
@@ -8,6 +9,7 @@ x-hardening: &hardening
 services:
     telegram:
         <<: *hardening
+        profiles: [telegram]
         image: ghcr.io/marioparaschiv/telecord-ingestion-telegram:latest
         env_file: telegram.env
         volumes:
@@ -17,6 +19,7 @@ services:
 
     discord:
         <<: *hardening
+        profiles: [discord]
         image: ghcr.io/marioparaschiv/telecord-ingestion-discord:latest
         env_file: discord.env
         labels:
@@ -24,6 +27,7 @@ services:
 
     updater:
         <<: *hardening
+        profiles: [updater]
         image: ghcr.io/marioparaschiv/telecord-ingestion-updater:latest
         init: true
         environment:
