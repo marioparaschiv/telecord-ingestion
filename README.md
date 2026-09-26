@@ -274,12 +274,13 @@ Once every `CHECK_INTERVAL` (default 24 hours), the updater:
 4. **Verification fails:** it logs `REFUSED` and changes nothing. The image is never downloaded.
 5. **Verification passes:** it downloads the image, waits `UPDATE_DELAY`, then restarts the service with the same config and volumes.
 
+The updater carries the label too, so it updates itself the same way, after the other services.
+
 ### Controlling updates
 
 - **Delay rollout:** set `UPDATE_DELAY`, such as `2d`, to give yourself time to hear about a bad release.
 - **Pin a release:** set the service's `image:` to a digest (`...-telegram@sha256:...`). Pinned images are skipped.
 - **Turn it off:** remove `updater` from `COMPOSE_PROFILES` in `.env`, or the label from a service.
-- **Update the updater:** `docker compose pull updater && docker compose up -d updater`.
 
 ### The Docker socket
 

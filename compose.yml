@@ -30,6 +30,8 @@ services:
         profiles: [updater]
         image: ghcr.io/marioparaschiv/telecord-ingestion-updater:latest
         init: true
+        # Reads the env files, which the installer leaves readable by their owner only.
+        cap_add: [DAC_READ_SEARCH]
         environment:
             COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME}
             CHECK_INTERVAL: ${CHECK_INTERVAL:-24h}
@@ -37,7 +39,10 @@ services:
         volumes:
             - /var/run/docker.sock:/var/run/docker.sock
             # Recreating a service goes through this compose file, so the updated container keeps its configuration.
-            - .:/project:ro
+            # The updater sets HOST_PROJECT_DIR, since `.` would resolve to /project when it recreates itself.
+            - ${HOST_PROJECT_DIR:-.}:/project:ro
+        labels:
+            telecord-ingestion.autoupdate: 'true'
 
 volumes:
     telegram-data:

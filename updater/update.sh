@@ -7,6 +7,7 @@ LABEL='telecord-ingestion.autoupdate=true'
 IDENTITY='^https://github\.com/marioparaschiv/telecord-ingestion/\.github/workflows/release\.yml@refs/tags/.*$'
 ISSUER='https://token.actions.githubusercontent.com'
 PROJECT_DIR=/project
+SOCKET=/var/run/docker.sock
 CHECK_INTERVAL="${CHECK_INTERVAL:-24h}"
 UPDATE_DELAY="${UPDATE_DELAY:-0}"
 
@@ -15,6 +16,24 @@ UPDATE_DELAY="${UPDATE_DELAY:-0}"
 log() {
 	echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*"
 }
+
+# Docker bind-mounts /etc/hostname from the container's own directory, which is named by its full id.
+SELF=$(sed -n 's|.* [^ ]*/containers/\([0-9a-f]\{64\}\)/hostname /etc/hostname .*|\1|p' /proc/self/mountinfo)
+
+if [ -z "$SELF" ]; then
+	log "Failed to find the updater's own container id"
+	exit 1
+fi
+
+if ! HOST_PROJECT_DIR=$(docker inspect \
+	--format "{{range .Mounts}}{{if eq .Destination \"$PROJECT_DIR\"}}{{.Source}}{{end}}{{end}}" \
+	"$SELF") || [ -z "$HOST_PROJECT_DIR" ]; then
+	log "Failed to find the host directory mounted at $PROJECT_DIR"
+	exit 1
+fi
+
+# compose.yml bind-mounts this as /project when the updater is recreated.
+export HOST_PROJECT_DIR
 
 # The repository part of an image reference, without its tag.
 repository_of() {
@@ -73,9 +92,18 @@ update() {
 	log "$service: verified $image, recreating after UPDATE_DELAY=$UPDATE_DELAY"
 	sleep "$UPDATE_DELAY"
 
-	if ! docker tag "$image" "$ref" ||
-		! docker compose --project-directory "$PROJECT_DIR" --project-name "$COMPOSE_PROJECT_NAME" \
-			up --detach --no-deps "$service"; then
+	if ! docker tag "$image" "$ref"; then
+		log "$service: failed to tag $image as $ref"
+		return 1
+	fi
+
+	if [ "$container" = "$SELF" ]; then
+		handoff "$service" "$image"
+		return
+	fi
+
+	if ! docker compose --project-directory "$PROJECT_DIR" --project-name "$COMPOSE_PROJECT_NAME" \
+		up --detach --no-deps "$service"; then
 		log "$service: failed to recreate on $image"
 		return 1
 	fi
@@ -83,8 +111,33 @@ update() {
 	log "$service: now running $image"
 }
 
+# Compose stops the old container before starting the new one, which would end
+# this script halfway, so the updater is recreated from a one-off container of
+# the verified image instead.
+handoff() {
+	service="$1"
+	image="$2"
+
+	if ! helper=$(docker run --detach --rm \
+		--read-only --tmpfs /tmp \
+		--cap-drop ALL --cap-add DAC_READ_SEARCH \
+		--security-opt no-new-privileges:true \
+		--volume "$SOCKET:$SOCKET" \
+		--volume "$HOST_PROJECT_DIR:$PROJECT_DIR:ro" \
+		--env HOST_PROJECT_DIR \
+		--entrypoint docker \
+		"$image" \
+		compose --project-directory "$PROJECT_DIR" --project-name "$COMPOSE_PROJECT_NAME" \
+		up --detach --no-deps "$service"); then
+		log "$service: failed to start the container that recreates it on $image"
+		return 1
+	fi
+
+	log "$service: recreating on $image from container $helper"
+}
+
 check() {
-	if ! containers=$(docker ps --quiet \
+	if ! containers=$(docker ps --quiet --no-trunc \
 		--filter "label=$LABEL" \
 		--filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME"); then
 		log "Failed to list the containers of $COMPOSE_PROJECT_NAME"
@@ -97,7 +150,12 @@ check() {
 	fi
 
 	for container in $containers; do
-		update "$container"
+		[ "$container" = "$SELF" ] || update "$container"
+	done
+
+	# Last, since recreating the updater ends this run.
+	for container in $containers; do
+		[ "$container" != "$SELF" ] || update "$container"
 	done
 }
 
