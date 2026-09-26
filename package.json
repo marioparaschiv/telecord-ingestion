@@ -1,0 +1,32 @@
+{
+	"name": "telecord-ingestion",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"packageManager": "pnpm@12.3.4",
+	"scripts": {
+		"build": "pnpm -r --if-present run build",
+		"test": "vitest run",
+		"typecheck": "pnpm -r --if-present run typecheck",
+		"lint": "oxlint --config .oxlintrc.json packages producers",
+		"lint:fix": "oxlint --config .oxlintrc.json --fix-dangerously packages producers",
+		"format": "oxfmt --config .oxfmtrc.json packages producers",
+		"format:check": "oxfmt --config .oxfmtrc.json --check packages producers"
+	},
+	"devDependencies": {
+		"@stylistic/eslint-plugin": "^5.10.0",
+		"@types/node": "catalog:",
+		"eslint-plugin-jsdoc": "^64.5.4",
+		"eslint-plugin-perfectionist": "^5.12.1",
+		"eslint-plugin-unicorn": "^76.0.0",
+		"oxfmt": "^0.70.0",
+		"oxlint": "^1.85.0",
+		"tsdown": "^0.23.0",
+		"typescript": "catalog:",
+		"vitest": "catalog:"
+	},
+	"engines": {
+		"node": ">=24.14.1 <25",
+		"pnpm": ">=12.3.4"
+	}
+}
