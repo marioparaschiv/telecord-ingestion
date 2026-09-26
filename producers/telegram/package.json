@@ -1,0 +1,28 @@
+{
+	"name": "@telecord/telegram-producer",
+	"version": "0.1.0",
+	"private": true,
+	"files": [
+		"dist"
+	],
+	"type": "module",
+	"scripts": {
+		"build": "tsdown",
+		"start": "node ./dist/index.mjs",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@mtcute/node": "catalog:",
+		"@telecord/ingest-client": "file:../../vendor/telecord-ingest-client-0.1.0.tgz",
+		"@telecord/producer-core": "workspace:*",
+		"zod": "catalog:"
+	},
+	"devDependencies": {
+		"@msgpack/msgpack": "catalog:",
+		"@total-typescript/ts-reset": "catalog:",
+		"@types/node": "catalog:",
+		"@types/ws": "catalog:",
+		"typescript": "catalog:",
+		"ws": "catalog:"
+	}
+}
