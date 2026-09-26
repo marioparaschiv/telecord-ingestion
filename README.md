@@ -1,11 +1,25 @@
-# telecord-ingestion
+<div align="center">
 
-```sh
-docker compose run --rm telegram   # log in once
-docker compose up -d               # then run everything
-```
+<img src="./assets/logo.svg" width="120" alt="Telecord logo" />
 
-Reference producers for the Telecord ingest protocol. A producer logs in as your own Telegram or Discord account, sends a fixed set of events to a Telecord ingest server and answers a fixed set of requests from it. You run the producer, so the server only sees what the producer sends.
+<h1>Telecord Ingestion</h1>
+
+<b>Connect your Telegram and Discord accounts to Telecord, on your own machine.</b>
+
+A producer logs in as your account, sends the chats you choose to a Telecord server and answers a fixed set of requests. You run it, so the server only sees what it sends.
+
+<br />
+
+[![Telegram](https://img.shields.io/badge/telegram-mtcute-0b9981?style=for-the-badge&labelColor=0c0c0c)](#supported-libraries)
+[![Discord](https://img.shields.io/badge/discord-selfbot-0b9981?style=for-the-badge&labelColor=0c0c0c)](#supported-libraries)
+[![Images](https://img.shields.io/badge/images-cosign%20signed-0b9981?style=for-the-badge&labelColor=0c0c0c)](#security)
+[![Node](https://img.shields.io/badge/node-24-0b9981?style=for-the-badge&labelColor=0c0c0c)](#local-development)
+
+**[Quick start](#quick-start)** · [Filters](#filters) · [Updates](#updates) · [FAQ](#faq)
+
+</div>
+
+---
 
 ## At a glance
 
