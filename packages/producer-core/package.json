@@ -1,0 +1,36 @@
+{
+	"name": "@telecord/producer-core",
+	"version": "0.1.0",
+	"private": true,
+	"files": [
+		"dist"
+	],
+	"type": "module",
+	"exports": {
+		".": {
+			"types": "./src/index.ts",
+			"development": "./src/index.ts",
+			"import": "./dist/index.mjs"
+		},
+		"./testing": {
+			"types": "./src/testing/index.ts",
+			"development": "./src/testing/index.ts",
+			"import": "./dist/testing/index.mjs"
+		}
+	},
+	"scripts": {
+		"build": "tsdown",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@telecord/ingest-client": "file:../../vendor/telecord-ingest-client-0.1.0.tgz",
+		"ws": "catalog:",
+		"zod": "catalog:"
+	},
+	"devDependencies": {
+		"@total-typescript/ts-reset": "catalog:",
+		"@types/node": "catalog:",
+		"@types/ws": "catalog:",
+		"typescript": "catalog:"
+	}
+}
