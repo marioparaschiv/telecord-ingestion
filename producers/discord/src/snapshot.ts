@@ -101,7 +101,8 @@ function rawGuild(guild: Guild, filter: Filter) {
 		.filter((channel): channel is NonThreadGuildBasedChannel => !channel.isThread())
 		.filter((channel) => isAllowed(filter, subjectOfChannel(channel)))
 		.map(rawChannel);
-	const self = guild.members.me;
+	// Not `members.me`: with member partials enabled it invents an empty member when none is cached.
+	const self = guild.client.user && guild.members.cache.get(guild.client.user.id);
 
 	return {
 		id: guild.id,
