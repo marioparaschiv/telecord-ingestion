@@ -69,7 +69,7 @@ const StreamVectorSchema = z.object({
 	id: z.string(),
 	kind: z.literal('stream'),
 	description: z.string(),
-	steps: z.array(z.object({ send: FrameSchema, expect: FrameSchema })),
+	steps: z.array(z.object({ send: FrameSchema, expect: FrameSchema.optional() })),
 });
 
 const VectorFileSchema = z.object({

@@ -114,8 +114,8 @@ catalogs:
       specifier: 0.32.3
       version: 0.32.3
     '@telecord/ingest-client':
-      specifier: ^0.4.0
-      version: 0.4.0
+      specifier: ^0.5.0
+      version: 0.5.0
     '@total-typescript/ts-reset':
       specifier: ^0.6.1
       version: 0.6.1
@@ -177,7 +177,7 @@ importers:
     dependencies:
       '@telecord/ingest-client':
         specifier: 'catalog:'
-        version: 0.4.0
+        version: 0.5.0
       ws:
         specifier: 'catalog:'
         version: 8.21.3
@@ -202,7 +202,7 @@ importers:
     dependencies:
       '@telecord/ingest-client':
         specifier: 'catalog:'
-        version: 0.4.0
+        version: 0.5.0
       '@telecord/producer-core':
         specifier: workspace:*
         version: link:../../packages/producer-core
@@ -239,7 +239,7 @@ importers:
         version: 0.32.3(ws@8.21.3)
       '@telecord/ingest-client':
         specifier: 'catalog:'
-        version: 0.4.0
+        version: 0.5.0
       '@telecord/producer-core':
         specifier: workspace:*
         version: link:../../packages/producer-core
@@ -794,8 +794,8 @@ packages:
     peerDependencies:
       eslint: ^9.0.0 || ^10.0.0
 
-  '@telecord/ingest-client@0.4.0':
-    resolution: {integrity: sha512-W0d/zNFSiIHXXt7cjE/steE/mrvLzIkcyV6xPT1w2cRtFBT5itBmSXLIgYF+5Ya8BFu/5ddaFRk6dCaEa7CNZg==}
+  '@telecord/ingest-client@0.5.0':
+    resolution: {integrity: sha512-nlMEoNMQ6ApSjde8Nw6Yo9cNdZoOvYB3GJgSFR/SWKE3eK4Gqc/HZ59YqPuoa/iVmZ7KMuVaHO89zTbZr5aTfg==}
 
   '@total-typescript/ts-reset@0.6.1':
     resolution: {integrity: sha512-cka47fVSo6lfQDIATYqb/vO1nvFfbPw7uWLayIXIhGETj0wcOOlrlkobOMDNQOFr9QOafegUPq13V2+6vtD7yg==}
@@ -2644,7 +2644,7 @@ snapshots:
       estraverse: 5.3.0
       picomatch: 4.0.7
 
-  '@telecord/ingest-client@0.4.0':
+  '@telecord/ingest-client@0.5.0':
     dependencies:
       '@msgpack/msgpack': 3.1.3
       zod: 4.6.5
