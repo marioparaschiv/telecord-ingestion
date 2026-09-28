@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 
 import { DiscordChatsPart, DiscordIdentify, DiscordOpcode } from '@telecord/ingest-client/discord';
+import { IngestOpcode, SessionState } from '@telecord/ingest-client';
 import { Outbox } from '@telecord/producer-core';
 
 import {
@@ -239,5 +240,44 @@ describe('gateway session', () => {
 		// The new READY does not hold the channel, so the seeded one is gone.
 		expect(await snapshotChannels(harness)).not.toContain(CREATED_CHANNEL.id);
 		expect(storedSession()).toMatchObject({ sessionId: harness.gateway.id, dispatches: [] });
+	});
+});
+
+describe('session state', () => {
+	it('reports ready once READY answers IDENTIFY', async () => {
+		const harness = await run();
+
+		expect(harness.sessionState).toEqual({
+			op: IngestOpcode.SESSION_STATE,
+			d: { state: SessionState.READY },
+		});
+	});
+
+	it('reports a token Discord closes the gateway over as invalid_credentials', async () => {
+		const harness = await run();
+
+		harness.gateway.close(4004, 'Authentication failed.');
+
+		expect(await harness.socket.nextFrame()).toEqual({
+			op: IngestOpcode.SESSION_STATE,
+			d: { state: SessionState.INVALID_CREDENTIALS, reason: '4004 Authentication failed.' },
+		});
+	});
+
+	it('reports reconnecting while the client resumes a dropped gateway session, then ready', async () => {
+		const harness = await run();
+
+		gateway.answerResume = { outcome: 'resumed', dispatches: [] };
+		harness.gateway.close(4000, 'Unknown error');
+
+		expect(await harness.socket.nextFrame()).toEqual({
+			op: IngestOpcode.SESSION_STATE,
+			d: { state: SessionState.RECONNECTING },
+		});
+		expect(await harness.socket.nextFrame()).toEqual({
+			op: IngestOpcode.SESSION_STATE,
+			d: { state: SessionState.READY },
+		});
+		expect(gateway.resumes).toEqual([{ token: TOKEN, session_id: harness.gateway.id, seq: 1 }]);
 	});
 });

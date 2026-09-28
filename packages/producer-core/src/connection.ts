@@ -13,6 +13,7 @@ import {
 	encodeFrame,
 	type IngestEnvelope,
 	type IngestFrameOpcode,
+	type IngestSessionState,
 } from '@telecord/ingest-client';
 
 import type { RequestHandler } from './requests';
@@ -80,6 +81,9 @@ function isFatalClose(code: number, reason: string): boolean {
  * time, and a cumulative `ACK` deletes every event it covers. Request results
  * are not events: they are sent live and never stored.
  *
+ * The platform session's state is sent live too: after each `READY` that
+ * answers `IDENTIFY`, and whenever the producer reports a new one.
+ *
  * Requests are answered as they arrive, through the handler registered for
  * their opcode. A close that only a configuration change or an upgrade fixes,
  * or another producer taking over the stream, stops the connection and calls
@@ -95,6 +99,8 @@ class IngestConnection {
 	/** The highest `seq` sent on the current stream. */
 	private sent = 0;
 	private maxFrameSize = MAX_FRAME_SIZE;
+	/** The platform session's state as last reported, or undefined before the first report. */
+	private sessionState: IngestSessionState | undefined;
 	private silenceLimit = HANDSHAKE_TIMEOUT;
 	private attempt = 0;
 	private stopped = false;
@@ -143,6 +149,21 @@ class IngestConnection {
 		if (seq !== undefined) {
 			this.pump();
 		}
+	}
+
+	/**
+	 * Reports the platform session's state, sent once the stream is ready and
+	 * again after every reconnect. A report of the state already held is dropped.
+	 *
+	 * @param sessionState - The state, with an optional reason for logs.
+	 */
+	reportSessionState(sessionState: IngestSessionState): void {
+		if (sessionState.state === this.sessionState?.state) {
+			return;
+		}
+
+		this.sessionState = sessionState;
+		this.sendSessionState();
 	}
 
 	private connect(): void {
@@ -313,10 +334,27 @@ class IngestConnection {
 			`${this.ready ? 'Rewinding' : 'Streaming'} from ${lastSeq + 1}, ${outbox.size} events to send`,
 		);
 
+		const identified = !this.ready;
+
 		this.ready = true;
 		this.acknowledged = lastSeq;
 		this.sent = lastSeq;
+
+		if (identified) {
+			this.sendSessionState();
+		}
+
 		this.pump();
+	}
+
+	private sendSessionState(): void {
+		const { socket, sessionState } = this;
+
+		if (!socket || !this.ready || !sessionState) {
+			return;
+		}
+
+		this.write(socket, encodeFrame(IngestOpcode.SESSION_STATE, sessionState));
 	}
 
 	private acknowledge(payload: unknown): void {

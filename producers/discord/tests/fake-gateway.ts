@@ -81,6 +81,11 @@ class GatewaySession {
 		this.send({ op: DISPATCH, t: event, s: ++this.sequence, d: payload });
 	}
 
+	/** Closes the connection from the gateway's side, as Discord does with a close code. */
+	close(code: number, reason: string): void {
+		this.socket.close(code, reason);
+	}
+
 	/** @returns Whether the session resumed. */
 	private resume(request: ResumeRequest, answer: ResumeAnswer): boolean {
 		if (answer.outcome === 'invalid') {

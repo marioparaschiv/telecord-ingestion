@@ -7,10 +7,12 @@ import type { TelegramIdentifyPayload } from '@telecord/ingest-client/telegram';
  * are left out, since the server refuses `nil` for them.
  *
  * @param client - The logged-in session.
+ * @param recovered - Whether the session fetched every update since its stored state.
  * @returns The `IDENTIFY` payload without the stream id.
  */
 async function identify(
 	client: TelegramClient,
+	recovered: boolean,
 ): Promise<Omit<TelegramIdentifyPayload, 'streamId'>> {
 	const { raw: user } = await client.getMe();
 	const { accessHash, bot, firstName, lastName, username, usernames, photo } = user;
@@ -33,6 +35,7 @@ async function identify(
 		...(photo?._ === 'userProfilePhoto' && {
 			photo: { _: 'userProfilePhoto', photoId: photo.photoId.toString(), dcId: photo.dcId },
 		}),
+		recovered,
 	};
 }
 

@@ -10,6 +10,7 @@ import { IngestConnection, type Filter, type Outbox } from '@telecord/producer-c
 import { createTelegramRequests } from './requests';
 import { createTelegramSnapshot } from './snapshot';
 import { createUpdateForwarder } from './updates';
+import { createSessionMonitor } from './session';
 import identify from './identify';
 
 type TelegramProducerOptions = {
@@ -31,7 +32,8 @@ type TelegramProducerOptions = {
  * serialized at.
  *
  * @param options - The session, filter rules, server, outbox and fatal-refusal handler.
- * @returns The connection, not yet started, and the update handlers to register on the client.
+ * @returns The connection, not yet started, the update handlers to register on the client, and
+ * the session monitor, which the connection reports the session's state from.
  */
 export function createTelegramProducer({
 	client,
@@ -42,6 +44,8 @@ export function createTelegramProducer({
 	window,
 	onFatal,
 }: TelegramProducerOptions) {
+	const session = createSessionMonitor(client, (state) => connection.reportSessionState(state));
+	let identity: Awaited<ReturnType<typeof identify>> | undefined;
 	const connection = new IngestConnection({
 		url,
 		apiKey,
@@ -50,7 +54,17 @@ export function createTelegramProducer({
 		version: tl.LAYER,
 		outbox,
 		window,
-		identify: () => identify(client),
+		identify: async () => {
+			// Telegram refuses getMe once the authorization is gone, so the account identifies as it
+			// last did and the server still hears invalid_credentials after a reconnect.
+			if (session.unauthorized && identity) {
+				return { ...identity, recovered: session.recovered };
+			}
+
+			identity = await identify(client, session.recovered);
+
+			return identity;
+		},
 		requests: {
 			...createTelegramRequests(client, filter),
 			[TelegramOpcode.CHATS_FETCH]: createTelegramSnapshot(client, filter),
@@ -65,5 +79,5 @@ export function createTelegramProducer({
 		send: (payload, capture) => connection.send(TelegramOpcode.UPDATE, payload, capture),
 	});
 
-	return { connection, updates };
+	return { connection, updates, session };
 }

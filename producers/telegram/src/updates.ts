@@ -173,7 +173,9 @@ export function createUpdateForwarder({ client, filter, outbox, send }: UpdateFo
 
 		try {
 			const full =
-				kind === 'user' ? await fetchFullUser(client, id) : await fetchFullChat(client, chatId);
+				kind === 'user'
+					? await fetchFullUser(client, id)
+					: await fetchFullChat(client, chatId);
 
 			if (full) {
 				if (isChat(full)) {
