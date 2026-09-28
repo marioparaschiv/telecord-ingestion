@@ -1,4 +1,6 @@
-import { createTaggedLogger, parseEnv } from '@telecord/producer-core';
+import { join } from 'node:path';
+
+import { OUTBOX_FILE, Outbox, createTaggedLogger, parseEnv } from '@telecord/producer-core';
 
 import { createTelegramProducer } from './producer';
 import createTelegramClient from './client';
@@ -11,14 +13,18 @@ const client = createTelegramClient({
 	apiId: env.TELEGRAM_API_ID,
 	apiHash: env.TELEGRAM_API_HASH,
 	dataDir: env.DATA_DIR,
-	onChannelTooLong: (channelId, difference) => updates.onChannelTooLong(channelId, difference),
+	onChannelTooLong: (_channelId, difference) => updates.onChannelTooLong(difference),
 });
+
+const outbox = new Outbox(join(env.DATA_DIR, OUTBOX_FILE));
 
 const { connection, updates } = createTelegramProducer({
 	client,
 	filter: { rules: env.FILTER_RULES, fallback: env.FILTER_DEFAULT },
 	url: env.INGEST_URL,
 	apiKey: env.INGEST_API_KEY,
+	outbox,
+	window: env.INGEST_WINDOW,
 	onFatal: (reason) => {
 		logger.error(`The ingest server refused this producer (${reason}), shutting down`);
 		void shutdown(1);
@@ -28,6 +34,7 @@ const { connection, updates } = createTelegramProducer({
 async function shutdown(code = 0): Promise<void> {
 	connection.stop();
 	await client.destroy();
+	outbox.close();
 	process.exit(code);
 }
 
@@ -46,4 +53,5 @@ logger.info(`Logged in to Telegram as ${me.displayName} (${me.id})`);
 process.once('SIGINT', () => void shutdown());
 process.once('SIGTERM', () => void shutdown());
 
+updates.start();
 connection.start();

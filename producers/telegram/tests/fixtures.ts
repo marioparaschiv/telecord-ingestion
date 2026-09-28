@@ -1,5 +1,6 @@
-import { Dialog, MemoryStorage, PeersIndex, TelegramClient, tl } from '@mtcute/node';
+import { Dialog, MemoryStorage, PeersIndex, TelegramClient, User, tl } from '@mtcute/node';
 import { TlBinaryReader, __tlReaderMap } from '@mtcute/node/utils.js';
+import { vi } from 'vitest';
 import { z } from 'zod';
 
 import {
@@ -10,10 +11,19 @@ import {
 	type VectorFrame,
 } from '@telecord/producer-core/testing';
 import telegramVectors from '@telecord/ingest-client/vectors/telegram.json' with { type: 'json' };
-import type { Filter } from '@telecord/producer-core';
+import { Outbox, type Filter } from '@telecord/producer-core';
 
 import { createTelegramProducer } from '../src/producer';
 import { TelegramEnvSchema } from '../src/env';
+
+/** The account the offline session is logged in as, with the fields the vectors' `IDENTIFY` names. */
+export const SELF: tl.RawUser = {
+	_: 'user',
+	id: 777_000_111,
+	self: true,
+	firstName: 'Conformance',
+	username: 'conformance',
+};
 
 /** The layer window the vectors are materialized against: mtcute's layer is the newest. */
 export const bindings: VectorBindings = {
@@ -22,7 +32,9 @@ export const bindings: VectorBindings = {
 	key: 'tc_test_key',
 	foreignKey: 'tc_foreign_key',
 	unboundKey: 'tc_unbound_key',
-	parkLimit: 10_000,
+	platformUserId: SELF.id,
+	otherUserId: 777_000_222,
+	streamId: '0190c3f6-6f1a-4c55-9d0e-3b1a2c4d5e6f',
 };
 
 export const vectors = loadVectors(telegramVectors, bindings);
@@ -166,6 +178,7 @@ export async function createOfflineClient(): Promise<TelegramClient> {
 	});
 
 	await client.prepare();
+	vi.spyOn(client, 'getMe').mockResolvedValue(new User(SELF));
 
 	return client;
 }
@@ -176,12 +189,13 @@ export type Harness = {
 	client: TelegramClient;
 	producer: ReturnType<typeof createTelegramProducer>;
 	socket: FakeProducerSocket;
+	outbox: Outbox;
 	close: () => Promise<void>;
 };
 
 /**
  * Starts a producer on an offline session seeded with the vectors' peers, and
- * greets its connection.
+ * greets its connection up to `READY`.
  *
  * @param filter - The producer's filter rules.
  * @returns The running harness.
@@ -192,31 +206,38 @@ export async function startHarness(filter: Filter = DEFAULT_FILTER): Promise<Har
 
 	await seedPeers(client, vectorUpdates());
 
+	const outbox = new Outbox(':memory:');
 	const producer = createTelegramProducer({
 		client,
 		filter,
 		url: server.url,
 		apiKey: bindings.key,
+		outbox,
+		window: 500,
 		onFatal: (reason) => {
 			throw new Error(`Unexpected fatal refusal: ${reason}`);
 		},
 	});
 
+	producer.updates.start();
 	producer.connection.start();
 
 	const socket = await server.nextConnection();
 
 	socket.hello();
+	await socket.ready();
 
 	return {
 		server,
 		client,
 		producer,
 		socket,
+		outbox,
 		async close() {
 			producer.connection.stop();
 			await server.close();
 			await client.destroy();
+			outbox.close();
 		},
 	};
 }

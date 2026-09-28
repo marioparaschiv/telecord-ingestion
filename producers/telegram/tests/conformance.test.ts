@@ -1,7 +1,15 @@
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { Long, PeersIndex, RawUpdateInfo, type TelegramClient } from '@mtcute/node';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import {
+	TelegramChatsPart,
+	TelegramMediaFetchResult,
+	TelegramMessagesFetchResult,
+	TelegramOpcode,
+	TelegramUpdate,
+	TelegramUsersFetchResult,
+} from '@telecord/ingest-client/telegram';
 import {
 	FakeIngestServer,
 	type ConnectVector,
@@ -10,15 +18,8 @@ import {
 	type RequestVector,
 	type VectorFrame,
 } from '@telecord/producer-core/testing';
-import {
-	TelegramChatsPart,
-	TelegramMediaFetchResult,
-	TelegramMessagesFetchResult,
-	TelegramOpcode,
-	TelegramUpdate,
-} from '@telecord/ingest-client/telegram';
-import { IngestErrorCode, IngestOpcode, IngestProbeResultSchema } from '@telecord/ingest-client';
-import type { Filter } from '@telecord/producer-core';
+import { IngestOpcode, IngestProbeResultSchema } from '@telecord/ingest-client';
+import { Outbox, type Filter } from '@telecord/producer-core';
 
 import {
 	DEFAULT_FILTER,
@@ -26,6 +27,7 @@ import {
 	bytesOf,
 	createOfflineClient,
 	decodeObject,
+	decodeVector,
 	vectorChats,
 	dialogOf,
 	iterate,
@@ -44,21 +46,13 @@ const DENY_CHANNEL: Filter = {
 	fallback: 'allow',
 };
 
-/** Errors after which the producer drops the frame instead of resending it. */
-const UNRECOVERABLE_ERRORS: readonly IngestErrorCode[] = [
-	IngestErrorCode.VALIDATION_ERROR,
-	IngestErrorCode.UNKNOWN_OPCODE,
-	IngestErrorCode.MISSING_PERMISSION,
-];
-
 const RESULT_SCHEMAS = new Map<string, z.ZodType>([
 	[TelegramOpcode.PROBE_RESULT, IngestProbeResultSchema],
 	[TelegramOpcode.MESSAGES_FETCH_RESULT, TelegramMessagesFetchResult],
 	[TelegramOpcode.MEDIA_FETCH_RESULT, TelegramMediaFetchResult],
 	[TelegramOpcode.CHATS_FETCH_RESULT, TelegramChatsPart],
+	[TelegramOpcode.USERS_FETCH_RESULT, TelegramUsersFetchResult],
 ]);
-
-const ErrorAnswerSchema = z.object({ code: z.enum(IngestErrorCode) });
 
 const connects = vectors.vectors.filter(
 	(candidate): candidate is ConnectVector => candidate.kind === 'connect',
@@ -73,16 +67,22 @@ const requests = vectors.vectors.filter(
 let server: FakeIngestServer;
 let client: TelegramClient;
 let producer: ReturnType<typeof createTelegramProducer>;
+let outbox: Outbox;
 const onFatal = vi.fn<(reason: string) => void>();
 
 function start(filter: Filter = DEFAULT_FILTER): void {
+	outbox = new Outbox(':memory:');
+	onTestFinished(() => outbox.close());
 	producer = createTelegramProducer({
 		client,
 		filter,
 		url: server.url,
 		apiKey: bindings.key,
+		outbox,
+		window: 500,
 		onFatal,
 	});
+	producer.updates.start();
 	producer.connection.start();
 }
 
@@ -108,6 +108,7 @@ async function greeted(hello: VectorFrame = helloFrame()): Promise<FakeProducerS
 	const socket = await server.nextConnection();
 
 	socket.send(IngestOpcode.HELLO, hello.d);
+	await socket.ready();
 
 	return socket;
 }
@@ -214,6 +215,30 @@ describe('connect vectors', () => {
 	);
 });
 
+describe('identify', () => {
+	it('answers HELLO with the IDENTIFY the vectors send, on its own stream', async () => {
+		start();
+
+		const socket = await server.nextConnection();
+
+		socket.send(IngestOpcode.HELLO, helloFrame().d);
+
+		const { op, d } = await socket.nextFrame();
+
+		expect({ op, d }).toEqual({
+			op: vectors.identify.op,
+			d: { ...z.looseObject({}).parse(vectors.identify.d), streamId: outbox.streamId },
+		});
+	});
+
+	it('writes each forwarded update to the outbox before its handler returns', () => {
+		start();
+		forwardVectorUpdate();
+
+		expect(outbox.captures()).toHaveLength(1);
+	});
+});
+
 describe('event vectors', () => {
 	it('forwards the event/update container byte for byte', async () => {
 		vi.useFakeTimers({ toFake: ['Date'] });
@@ -233,49 +258,38 @@ describe('event vectors', () => {
 
 		expect({ op: frame.op, d: frame.d }).toEqual({ op: expected.send.op, d: expected.send.d });
 		expect(TelegramUpdate.safeParse(frame.d).success).toBe(true);
-		expect(frame.nonce).toEqual(expect.any(String));
+		expect(frame.seq).toBe(1);
 	});
 
 	it.each(events.map((event) => [event.id, event] as const))(
-		'%s: keeps or drops the frame the way the answer says',
+		'%s: keeps the event until an ACK covers it',
 		async (_id, { expect: answer }) => {
 			start();
 
 			const socket = await greeted();
 
 			forwardVectorUpdate();
+			await socket.nextFrame();
 
-			const frame = await socket.nextFrame();
-			const error =
-				answer.op === IngestOpcode.ERROR ? ErrorAnswerSchema.parse(answer.d) : undefined;
-			const nonce = answer.nonce === undefined ? undefined : frame.nonce;
+			const acknowledged = answer.op === IngestOpcode.ACK;
 
-			if (error) {
-				socket.send(
-					IngestOpcode.ERROR,
-					{ code: error.code, message: 'from a vector' },
-					nonce,
-				);
-			} else {
-				socket.send(IngestOpcode.ACK, null, nonce);
-			}
-
+			socket.send(
+				z.enum(IngestOpcode).parse(answer.op),
+				acknowledged
+					? answer.d
+					: { ...z.looseObject({}).parse(answer.d), message: 'from a vector' },
+			);
 			socket.send(IngestOpcode.PING);
 
 			expect(await socket.nextFrame()).toEqual({ op: IngestOpcode.PONG });
-
-			const kept =
-				nonce === undefined ||
-				(error !== undefined && !UNRECOVERABLE_ERRORS.includes(error.code));
-
-			expect(producer.connection.unacknowledged).toBe(kept ? 1 : 0);
+			expect(outbox.size).toBe(acknowledged ? 0 : 1);
 		},
 	);
 });
 
 describe('request vectors', () => {
 	/** Stubs the Telegram side of an accepted vector and returns the filter it runs under. */
-	function arrange(id: string, reply: VectorFrame[]): Filter {
+	async function arrange(id: string, reply: VectorFrame[]): Promise<Filter> {
 		const call = vi.spyOn(client, 'call').mockRejectedValue(new Error('No call expected'));
 		const download = vi.spyOn(client, 'downloadAsIterable').mockImplementation(() => {
 			throw new Error('No download expected');
@@ -348,6 +362,21 @@ describe('request vectors', () => {
 				return DEFAULT_FILTER;
 			}
 
+			case 'request/users-fetch': {
+				const users = decodeVector(field(first, 'users')).map((user) =>
+					narrow(user, 'user'),
+				);
+
+				await seedPeers(client, { users });
+				call.mockImplementation(async (request) => {
+					expect(request._).toBe('users.getUsers');
+
+					return users;
+				});
+
+				return DEFAULT_FILTER;
+			}
+
 			case 'request/messages-fetch-filtered':
 			case 'request/media-fetch-filtered':
 				return DENY_CHANNEL;
@@ -362,7 +391,7 @@ describe('request vectors', () => {
 			.filter(({ outcome }) => outcome === 'accepted')
 			.map((request) => [request.id, request] as const),
 	)('%s: answers with exactly the vector reply', async (id, request) => {
-		const filter = arrange(id, request.reply);
+		const filter = await arrange(id, request.reply);
 
 		start(filter);
 

@@ -1,5 +1,10 @@
+import {
+	isInputPeerChannel,
+	isInputPeerUser,
+	toInputChannel,
+	toInputUser,
+} from '@mtcute/node/utils.js';
 import { Long, getMarkedPeerId, tl, type TelegramClient } from '@mtcute/node';
-import { isInputPeerChannel, toInputChannel } from '@mtcute/node/utils.js';
 
 import {
 	TelegramMediaFetch,
@@ -7,10 +12,14 @@ import {
 	TelegramMessagesFetch,
 	TelegramMessagesFetchResult,
 	TelegramOpcode,
+	TelegramUsersFetch,
+	TelegramUsersFetchResult,
 	type TelegramMediaFetchPayload,
 	type TelegramMediaFetchResultPayload,
 	type TelegramMessagesFetchPayload,
 	type TelegramMessagesFetchResultPayload,
+	type TelegramUsersFetchPayload,
+	type TelegramUsersFetchResultPayload,
 } from '@telecord/ingest-client/telegram';
 import {
 	defineProbe,
@@ -24,7 +33,7 @@ import {
 } from '@telecord/producer-core';
 import { RequestFailureReason } from '@telecord/ingest-client';
 
-import { decodeFileLocation, serialize, type FileLocation } from './tl';
+import { decodeFileLocation, serialize, serializeVector, type FileLocation } from './tl';
 import { subjectOfMarkedId } from './peers';
 
 /** Errors meaning this session can no longer read the chat. */
@@ -128,6 +137,36 @@ async function fetchMessages(
 
 	try {
 		return { ok: true, messages: serialize(await readMessages(client, peer, request)) };
+	} catch (error) {
+		return isAccessError(error)
+			? {
+					ok: false,
+					reason: RequestFailureReason.ACCESS_LOST,
+					message: failureMessage(error),
+				}
+			: { ok: false, message: failureMessage(error) };
+	}
+}
+
+/**
+ * Answers one `USERS_FETCH` with the boxed `Vector<User>` `users.getUsers`
+ * returned: the server asks because the user just changed, so the session's
+ * cached copy is not the answer. A user is no chat, so no filter applies.
+ */
+async function fetchUsers(
+	client: TelegramClient,
+	{ userId }: TelegramUsersFetchPayload,
+): Promise<TelegramUsersFetchResultPayload> {
+	const peer = await client.storage.peers.getById(userId);
+
+	if (!peer || !isInputPeerUser(peer)) {
+		return { ok: false, reason: RequestFailureReason.ACCESS_LOST };
+	}
+
+	try {
+		const users = await client.call({ _: 'users.getUsers', id: [toInputUser(peer)] });
+
+		return { ok: true, users: serializeVector(users) };
 	} catch (error) {
 		return isAccessError(error)
 			? {
@@ -359,7 +398,8 @@ async function fetchMedia(
 
 /**
  * The single-result requests a Telegram producer answers: `PROBE`,
- * `MESSAGES_FETCH` and `MEDIA_FETCH`, each checked against the filter rules.
+ * `MESSAGES_FETCH`, `MEDIA_FETCH` and `USERS_FETCH`, each chat-scoped one
+ * checked against the filter rules.
  *
  * @param client - The logged-in session.
  * @param filter - The producer's filter rules.
@@ -382,6 +422,12 @@ export function createTelegramRequests(
 			result: TelegramOpcode.MEDIA_FETCH_RESULT,
 			resultSchema: TelegramMediaFetchResult,
 			handle: (request) => fetchMedia(client, filter, request),
+		}),
+		[TelegramOpcode.USERS_FETCH]: defineRequest({
+			payload: TelegramUsersFetch,
+			result: TelegramOpcode.USERS_FETCH_RESULT,
+			resultSchema: TelegramUsersFetchResult,
+			handle: (request) => fetchUsers(client, request),
 		}),
 	};
 }

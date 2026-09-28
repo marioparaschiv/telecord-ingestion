@@ -5,17 +5,22 @@ import {
 	TELEGRAM_VERSION_PARAM,
 	TelegramOpcode,
 } from '@telecord/ingest-client/telegram';
-import { IngestConnection, type Filter } from '@telecord/producer-core';
+import { IngestConnection, type Filter, type Outbox } from '@telecord/producer-core';
 
 import { createTelegramRequests } from './requests';
 import { createTelegramSnapshot } from './snapshot';
 import { createUpdateForwarder } from './updates';
+import identify from './identify';
 
 type TelegramProducerOptions = {
 	client: TelegramClient;
 	filter: Filter;
 	url: string;
 	apiKey: string;
+	/** The stream the account's updates are captured in and sent from. */
+	outbox: Outbox;
+	/** The most events sent and not yet acknowledged. */
+	window: number;
 	onFatal: (reason: string) => void;
 };
 
@@ -25,7 +30,7 @@ type TelegramProducerOptions = {
  * route is declared at mtcute's TL layer, the layer every payload is
  * serialized at.
  *
- * @param options - The session, filter rules, server and fatal-refusal handler.
+ * @param options - The session, filter rules, server, outbox and fatal-refusal handler.
  * @returns The connection, not yet started, and the update handlers to register on the client.
  */
 export function createTelegramProducer({
@@ -33,6 +38,8 @@ export function createTelegramProducer({
 	filter,
 	url,
 	apiKey,
+	outbox,
+	window,
 	onFatal,
 }: TelegramProducerOptions) {
 	const connection = new IngestConnection({
@@ -41,6 +48,9 @@ export function createTelegramProducer({
 		route: TELEGRAM_ROUTE,
 		versionParam: TELEGRAM_VERSION_PARAM,
 		version: tl.LAYER,
+		outbox,
+		window,
+		identify: () => identify(client),
 		requests: {
 			...createTelegramRequests(client, filter),
 			[TelegramOpcode.CHATS_FETCH]: createTelegramSnapshot(client, filter),
@@ -51,7 +61,8 @@ export function createTelegramProducer({
 	const updates = createUpdateForwarder({
 		client,
 		filter,
-		send: (payload) => connection.send(TelegramOpcode.UPDATE, payload),
+		outbox,
+		send: (payload, capture) => connection.send(TelegramOpcode.UPDATE, payload, capture),
 	});
 
 	return { connection, updates };
