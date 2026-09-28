@@ -5,11 +5,11 @@ import {
 	DISCORD_FORWARDED_DISPATCHES,
 	DiscordAttachmentRefreshResult,
 	DiscordChatsPart,
+	DiscordIdentify,
 	DiscordMessagesFetchResult,
 	DiscordOpcode,
 } from '@telecord/ingest-client/discord';
 import {
-	IngestErrorCode,
 	IngestMediaFetchResultSchema,
 	IngestOpcode,
 	IngestProbeResultSchema,
@@ -21,6 +21,7 @@ import type { Filter } from '@telecord/producer-core';
 import {
 	GENERAL_CHANNEL_ID,
 	GUILD_ID,
+	SELF,
 	guildCreate,
 	startDiscord,
 	vectors,
@@ -33,13 +34,6 @@ const DENY_GENERAL: Filter = {
 	rules: [{ action: 'deny', match: { channelId: [GENERAL_CHANNEL_ID] } }],
 	fallback: 'allow',
 };
-
-/** Errors after which the producer drops the frame instead of resending it. */
-const UNRECOVERABLE_ERRORS: readonly IngestErrorCode[] = [
-	IngestErrorCode.VALIDATION_ERROR,
-	IngestErrorCode.UNKNOWN_OPCODE,
-	IngestErrorCode.MISSING_PERMISSION,
-];
 
 const FORWARDED = new Set<string>(DISCORD_FORWARDED_DISPATCHES);
 
@@ -57,8 +51,6 @@ const RESULT_SCHEMAS = new Map<string, z.ZodType>([
 	[DiscordOpcode.ATTACHMENT_REFRESH_RESULT, DiscordAttachmentRefreshResult],
 	[DiscordOpcode.CHATS_FETCH_RESULT, DiscordChatsPart],
 ]);
-
-const ErrorAnswerSchema = z.object({ code: z.enum(IngestErrorCode) });
 
 const events = vectors.vectors.filter(
 	(candidate): candidate is EventVector => candidate.kind === 'event',
@@ -105,13 +97,28 @@ async function ask(op: DiscordOpcode, payload: unknown, nonce: string): Promise<
 	}
 }
 
-describe('event vectors', () => {
-	it('forwards GUILD_CREATE exactly as the gateway sent it', async () => {
+describe('identify', () => {
+	it('answers HELLO with the IDENTIFY fields the vectors send, naming the account and its stream', async () => {
 		await start();
 
-		expect(harness.backlog).toEqual([
-			{ op: 'GUILD_CREATE', d: guildCreate(), nonce: expect.any(String) },
-		]);
+		const { d } = harness.identify;
+
+		expect(Object.keys(payloadOf(harness.identify)).toSorted()).toEqual(
+			Object.keys(payloadOf(vectors.identify)).toSorted(),
+		);
+		expect(DiscordIdentify.parse(d)).toEqual({
+			...SELF,
+			bot: false,
+			streamId: harness.outbox.streamId,
+		});
+	});
+});
+
+describe('event vectors', () => {
+	it('forwards GUILD_CREATE exactly as the gateway sent it, as the first event of the stream', async () => {
+		await start();
+
+		expect(harness.backlog).toEqual([{ op: 'GUILD_CREATE', d: guildCreate(), seq: 1 }]);
 	});
 
 	it.each(events.map((event) => [event.id, event] as const))(
@@ -123,7 +130,7 @@ describe('event vectors', () => {
 			harness.gateway.dispatch('MESSAGE_DELETE', SENTINEL);
 
 			const frame = await harness.socket.nextFrame();
-			const sentinel = { op: 'MESSAGE_DELETE', d: SENTINEL, nonce: expect.any(String) };
+			const sentinel = { op: 'MESSAGE_DELETE', d: SENTINEL, seq: expect.any(Number) };
 
 			if (!FORWARDED.has(send.op)) {
 				expect(frame).toEqual(sentinel);
@@ -131,14 +138,13 @@ describe('event vectors', () => {
 				return;
 			}
 
-			expect(frame).toEqual({ op: send.op, d: send.d, nonce: expect.any(String) });
-			harness.socket.send(IngestOpcode.ACK, null, frame.nonce);
-			expect(await harness.socket.nextFrame()).toEqual(sentinel);
+			expect(frame).toEqual({ op: send.op, d: send.d, seq: 2 });
+			expect(await harness.socket.nextFrame()).toEqual({ ...sentinel, seq: 3 });
 		},
 	);
 
 	it.each(events.map((event) => [event.id, event] as const))(
-		'%s: keeps or drops a forwarded frame the way the answer says',
+		'%s: keeps a forwarded event until an ACK covers it',
 		async (_id, { expect: answer }) => {
 			await start();
 
@@ -147,29 +153,18 @@ describe('event vectors', () => {
 			harness.gateway.dispatch('MESSAGE_CREATE', payloadOf(event?.send));
 
 			const frame = await harness.socket.nextFrame();
-			const error =
-				answer.op === IngestOpcode.ERROR ? ErrorAnswerSchema.parse(answer.d) : undefined;
-			const nonce = answer.nonce === undefined ? undefined : frame.nonce;
+			const acknowledged = answer.op === IngestOpcode.ACK;
+			// The vectors answer the stream's first event; here it follows the backlog.
+			const seq = 'seq' in payloadOf(answer) ? { seq: frame.seq } : {};
 
-			if (error) {
-				harness.socket.send(
-					IngestOpcode.ERROR,
-					{ code: error.code, message: 'from a vector' },
-					nonce,
-				);
-			} else {
-				harness.socket.send(IngestOpcode.ACK, null, nonce);
-			}
-
+			harness.socket.send(
+				z.enum(IngestOpcode).parse(answer.op),
+				acknowledged ? seq : { ...payloadOf(answer), ...seq, message: 'from a vector' },
+			);
 			harness.socket.send(IngestOpcode.PING);
 
 			expect(await harness.socket.nextFrame()).toEqual({ op: IngestOpcode.PONG });
-
-			const kept =
-				nonce === undefined ||
-				(error !== undefined && !UNRECOVERABLE_ERRORS.includes(error.code));
-
-			expect(harness.producer.connection.unacknowledged).toBe(kept ? 1 : 0);
+			expect(harness.outbox.size).toBe(acknowledged ? 0 : 1);
 		},
 	);
 });
@@ -265,6 +260,25 @@ describe('request vectors', () => {
 		expect(named).toEqual(snapshot?.chats);
 		expect(harness.rest.mock.calls.length).toBe(calls);
 		expect(cdn).not.toHaveBeenCalled();
+	});
+
+	it("request/chats-fetch: names each channel's newest message as it arrived", async () => {
+		await start();
+
+		const [event] = events.filter(({ send }) => send.op === 'MESSAGE_CREATE');
+		const message = payloadOf(event?.send);
+
+		harness.gateway.dispatch('MESSAGE_CREATE', message);
+		await harness.socket.nextFrame();
+
+		const parts = (await ask(DiscordOpcode.CHATS_FETCH, {}, 'snapshot')).map((part) =>
+			DiscordChatsPart.parse(part.d),
+		);
+		const general = parts
+			.flatMap(({ guilds }) => guilds.flatMap(({ channels }) => channels))
+			.find(({ id }) => id === GENERAL_CHANNEL_ID);
+
+		expect(general?.last_message_id).toBe(Reflect.get(message, 'id'));
 	});
 
 	it.each(

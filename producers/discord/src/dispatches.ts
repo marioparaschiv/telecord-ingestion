@@ -22,7 +22,7 @@ function optional<T extends z.ZodType>(schema: T) {
 }
 
 /** The ids a dispatch is routed by. A field of the wrong type is ignored, never a reason to drop the dispatch. */
-const RoutingSchema = z.object({
+export const RoutingSchema = z.object({
 	id: optional(z.string()),
 	type: optional(z.number()),
 	guild_id: optional(z.string()),

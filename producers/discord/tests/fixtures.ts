@@ -10,28 +10,13 @@ import {
 } from '@telecord/producer-core/testing';
 import discordVectors from '@telecord/ingest-client/vectors/discord.json' with { type: 'json' };
 import type { IngestEnvelope } from '@telecord/ingest-client';
+import { Outbox, type Filter } from '@telecord/producer-core';
 import { IngestOpcode } from '@telecord/ingest-client';
-import type { Filter } from '@telecord/producer-core';
 
 import { FakeDiscordGateway, type GatewaySession } from './fake-gateway';
 import { createDiscordProducer } from '../src/producer';
 import { DiscordEnvSchema } from '../src/env';
-
-export const bindings: VectorBindings = {
-	min: 9,
-	max: 10,
-	key: 'tc_test_key',
-	foreignKey: 'tc_foreign_key',
-	unboundKey: 'tc_unbound_key',
-	parkLimit: 10_000,
-};
-
-export const vectors = loadVectors(discordVectors, bindings);
-
-export const GUILD_ID = '1100000000000000001';
-export const GENERAL_CHANNEL_ID = '1100000000000000002';
-export const NOTES_CHANNEL_ID = '1100000000000000003';
-export const DM_CHANNEL_ID = '1100000000000000500';
+import { loadSession } from '../src/session';
 
 export const SELF = {
 	id: '1100000000000000200',
@@ -40,6 +25,24 @@ export const SELF = {
 	global_name: 'Ada',
 	avatar: null,
 };
+
+export const bindings: VectorBindings = {
+	min: 9,
+	max: 10,
+	key: 'tc_test_key',
+	foreignKey: 'tc_foreign_key',
+	unboundKey: 'tc_unbound_key',
+	platformUserId: SELF.id,
+	otherUserId: '1100000000000000299',
+	streamId: '0190c3f6-6f1a-4c55-9d0e-3b1a2c4d5e6f',
+};
+
+export const vectors = loadVectors(discordVectors, bindings);
+
+export const GUILD_ID = '1100000000000000001';
+export const GENERAL_CHANNEL_ID = '1100000000000000002';
+export const NOTES_CHANNEL_ID = '1100000000000000003';
+export const DM_CHANNEL_ID = '1100000000000000500';
 
 export const FRIEND = {
 	id: '1100000000000000201',
@@ -105,26 +108,43 @@ export type DiscordHarness = {
 	gateway: GatewaySession;
 	socket: FakeProducerSocket;
 	producer: ReturnType<typeof createDiscordProducer>;
+	outbox: Outbox;
 	/** Stands in for the library's HTTP client; every REST call goes through it. */
 	rest: Mock<typeof fetch>;
 	/** Answers for REST routes, keyed by `METHOD /path`. */
 	routes: Map<string, RestHandler>;
+	/** The `IDENTIFY` the producer answered `HELLO` with. */
+	identify: IngestEnvelope;
 	/** The frames forwarded while the client logged in, already acknowledged. */
 	backlog: IngestEnvelope[];
 	close: () => Promise<void>;
 };
 
+type RunOptions = {
+	/** A gateway an earlier run used, left running when this run closes; a new one when absent. */
+	gateway?: FakeDiscordGateway;
+	/** The outbox file an earlier run used; in memory when absent. */
+	outboxPath?: string;
+	/** Announces the guild whole in `READY`, as Discord does for a user account, instead of in a `GUILD_CREATE` after it. */
+	guildInReady?: boolean;
+};
+
 /**
  * Logs a client in to a local gateway that announces the vectors' guild and a
- * DM, starts its producer against a local ingest server and greets it.
+ * DM, starts its producer against a local ingest server and greets it up to `READY`.
  *
  * @param filter - The producer's filter rules.
+ * @param run - The gateway and outbox to share with an earlier run.
  * @returns The running harness.
  */
-export async function startDiscord(filter: Filter = DEFAULT_FILTER): Promise<DiscordHarness> {
-	const gateway = await FakeDiscordGateway.start();
+export async function startDiscord(
+	filter: Filter = DEFAULT_FILTER,
+	{ gateway: shared, outboxPath = ':memory:', guildInReady = false }: RunOptions = {},
+): Promise<DiscordHarness> {
+	const gateway = shared ?? (await FakeDiscordGateway.start());
 	const ingest = await FakeIngestServer.start();
-	const client = new Client();
+	const outbox = new Outbox(outboxPath);
+	const client = new Client({ session: loadSession(outbox) });
 	const routes = new Map<string, RestHandler>([
 		['GET /api/v9/gateway', () => ({ url: gateway.url })],
 	]);
@@ -146,26 +166,33 @@ export async function startDiscord(filter: Filter = DEFAULT_FILTER): Promise<Dis
 		filter,
 		url: ingest.url,
 		apiKey: bindings.key,
+		outbox,
+		window: 500,
 		onFatal: (reason) => {
 			throw new Error(`Unexpected fatal refusal: ${reason}`);
 		},
 	});
 
-	client.on('raw', (packet) => producer.dispatches.onPacket(packet));
+	client.on('raw', (packet) => producer.onPacket(packet));
 
 	const ready = new Promise((resolve) => client.once('ready', resolve));
 	const login = client.login('test.token.value');
 	const session = await gateway.nextSession();
 
-	session.dispatch('READY', {
-		user: SELF,
-		guilds: [{ id: GUILD_ID, unavailable: true }],
-		private_channels: [DM_CHANNEL],
-		relationships: [],
-		session_id: 'session',
-		resume_gateway_url: gateway.url,
-	});
-	session.dispatch('GUILD_CREATE', guildCreate());
+	if (!session.resumed) {
+		session.dispatch('READY', {
+			user: SELF,
+			guilds: [guildInReady ? guildCreate() : { id: GUILD_ID, unavailable: true }],
+			private_channels: [DM_CHANNEL],
+			relationships: [],
+			session_id: session.id,
+			resume_gateway_url: gateway.url,
+		});
+
+		if (!guildInReady) {
+			session.dispatch('GUILD_CREATE', guildCreate());
+		}
+	}
 
 	await ready;
 	await login;
@@ -176,11 +203,14 @@ export async function startDiscord(filter: Filter = DEFAULT_FILTER): Promise<Dis
 	const backlog: IngestEnvelope[] = [];
 
 	socket.hello();
+
+	const identify = await socket.ready();
+
 	socket.send(IngestOpcode.PING);
 
 	for (let frame = await socket.nextFrame(); frame.op !== IngestOpcode.PONG;) {
 		backlog.push(frame);
-		socket.send(IngestOpcode.ACK, null, frame.nonce);
+		socket.send(IngestOpcode.ACK, { seq: frame.seq });
 		frame = await socket.nextFrame();
 	}
 
@@ -189,14 +219,22 @@ export async function startDiscord(filter: Filter = DEFAULT_FILTER): Promise<Dis
 		gateway: session,
 		socket,
 		producer,
+		outbox,
+		identify,
 		rest,
 		routes,
 		backlog,
 		async close() {
 			producer.connection.stop();
-			client.destroy();
+			client.destroy({ resumable: true });
+			await session.closed;
 			await ingest.close();
-			await gateway.close();
+
+			if (!shared) {
+				await gateway.close();
+			}
+
+			outbox.close();
 		},
 	};
 }

@@ -22,6 +22,8 @@ services:
         profiles: [discord]
         image: ghcr.io/marioparaschiv/telecord-ingestion-discord:latest
         env_file: discord.env
+        volumes:
+            - discord-data:/data
         labels:
             telecord-ingestion.autoupdate: 'true'
 
@@ -46,3 +48,4 @@ services:
 
 volumes:
     telegram-data:
+    discord-data:

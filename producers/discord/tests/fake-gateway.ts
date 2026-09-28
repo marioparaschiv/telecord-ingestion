@@ -3,29 +3,72 @@ import { z } from 'zod';
 
 import { AsyncQueue } from '@telecord/producer-core/testing';
 
-const HELLO = 10;
-const HEARTBEAT = 1;
-const HEARTBEAT_ACK = 11;
-const IDENTIFY = 2;
 const DISPATCH = 0;
+const HEARTBEAT = 1;
+const IDENTIFY = 2;
+const RESUME = 6;
+const INVALID_SESSION = 9;
+const HELLO = 10;
+const HEARTBEAT_ACK = 11;
 
 const GatewayFrameSchema = z.object({ op: z.number(), d: z.unknown().optional() });
+
+const ResumeSchema = z.object({ token: z.string(), session_id: z.string(), seq: z.number() });
+
+export type ResumeRequest = z.infer<typeof ResumeSchema>;
+
+/** How the gateway answers a `RESUME`: the dispatches it replays then `RESUMED`, or an invalid session. */
+export type ResumeAnswer =
+	| { outcome: 'resumed'; dispatches: { event: string; payload: object }[] }
+	| { outcome: 'invalid' };
+
+type SessionHooks = {
+	/** Names the session a client identifies. */
+	nextSessionId: () => string;
+	answerResume: (request: ResumeRequest) => ResumeAnswer;
+};
 
 /** One client connection to the fake gateway. */
 class GatewaySession {
 	private sequence = 0;
-	/** Settles once the client identified. */
-	readonly identified: Promise<void>;
+	/** The session the client identified or resumed. */
+	id = '';
+	/** Whether the client resumed a session rather than identifying. */
+	resumed = false;
+	/** Settles once the client identified, or resumed a session the gateway accepted. */
+	readonly established: Promise<void>;
+	/** Settles with the code the connection closed with. */
+	readonly closed: Promise<number>;
 
-	constructor(private socket: WebSocket) {
-		this.identified = new Promise((resolve) => {
+	constructor(
+		private socket: WebSocket,
+		hooks: SessionHooks,
+	) {
+		this.closed = new Promise((resolve) => socket.on('close', resolve));
+		this.established = new Promise((resolve) => {
 			socket.on('message', (data) => {
 				const frame = GatewayFrameSchema.parse(JSON.parse(String(data)));
 
-				if (frame.op === IDENTIFY) {
-					resolve();
-				} else if (frame.op === HEARTBEAT) {
-					this.send({ op: HEARTBEAT_ACK });
+				switch (frame.op) {
+					case IDENTIFY:
+						this.id = hooks.nextSessionId();
+						this.sequence = 0;
+						resolve();
+
+						return;
+
+					case RESUME: {
+						const request = ResumeSchema.parse(frame.d);
+
+						if (this.resume(request, hooks.answerResume(request))) {
+							resolve();
+						}
+
+						return;
+					}
+
+					case HEARTBEAT:
+						this.send({ op: HEARTBEAT_ACK });
 				}
 			});
 		});
@@ -38,6 +81,27 @@ class GatewaySession {
 		this.send({ op: DISPATCH, t: event, s: ++this.sequence, d: payload });
 	}
 
+	/** @returns Whether the session resumed. */
+	private resume(request: ResumeRequest, answer: ResumeAnswer): boolean {
+		if (answer.outcome === 'invalid') {
+			this.send({ op: INVALID_SESSION, d: false });
+
+			return false;
+		}
+
+		this.id = request.session_id;
+		this.resumed = true;
+		this.sequence = request.seq;
+
+		for (const { event, payload } of answer.dispatches) {
+			this.dispatch(event, payload);
+		}
+
+		this.dispatch('RESUMED', {});
+
+		return true;
+	}
+
 	private send(frame: object): void {
 		this.socket.send(JSON.stringify(frame));
 	}
@@ -46,12 +110,29 @@ class GatewaySession {
 /**
  * A local Discord gateway speaking just enough of the protocol for a client to
  * log in: `HELLO`, then dispatches the test sends once the client identified.
+ * A `RESUME` is recorded and answered as `answerResume` says.
  */
 export class FakeDiscordGateway {
 	private sessions = new AsyncQueue<GatewaySession>();
+	/** How many times a client identified. */
+	identified = 0;
+	/** Every `RESUME` received, in order. */
+	readonly resumes: ResumeRequest[] = [];
+	answerResume: ResumeAnswer = { outcome: 'invalid' };
 
 	private constructor(private wss: WebSocketServer) {
-		wss.on('connection', (socket) => this.sessions.push(new GatewaySession(socket)));
+		wss.on('connection', (socket) => {
+			const session = new GatewaySession(socket, {
+				nextSessionId: () => `session-${++this.identified}`,
+				answerResume: (request) => {
+					this.resumes.push(request);
+
+					return this.answerResume;
+				},
+			});
+
+			void session.established.then(() => this.sessions.push(session));
+		});
 	}
 
 	/**
@@ -78,16 +159,12 @@ export class FakeDiscordGateway {
 	}
 
 	/**
-	 * The next client session, once it identified.
+	 * The next client session, once it identified or resumed.
 	 *
 	 * @returns The session.
 	 */
-	async nextSession(): Promise<GatewaySession> {
-		const session = await this.sessions.next();
-
-		await session.identified;
-
-		return session;
+	nextSession(): Promise<GatewaySession> {
+		return this.sessions.next();
 	}
 
 	async close(): Promise<void> {

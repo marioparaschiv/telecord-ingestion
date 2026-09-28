@@ -61,6 +61,16 @@ function rawOverwrite(overwrite: PermissionOverwrites) {
 	};
 }
 
+/**
+ * The channel's newest message id, which the client keeps current as messages
+ * arrive, left out for a channel that holds no messages.
+ */
+function lastMessageOf(channel: object): { last_message_id?: string } {
+	return 'lastMessageId' in channel && typeof channel.lastMessageId === 'string'
+		? { last_message_id: channel.lastMessageId }
+		: {};
+}
+
 function rawChannel(channel: NonThreadGuildBasedChannel) {
 	return {
 		id: channel.id,
@@ -70,6 +80,7 @@ function rawChannel(channel: NonThreadGuildBasedChannel) {
 		position: channel.rawPosition,
 		parent_id: channel.parentId,
 		permission_overwrites: channel.permissionOverwrites.cache.map(rawOverwrite),
+		...lastMessageOf(channel),
 	};
 }
 
@@ -116,6 +127,7 @@ function rawPrivateChannels(client: Client, filter: Filter): object[] {
 				id: channel.id,
 				type: Constants.ChannelTypes.DM,
 				recipients: [rawUser(channel.recipient)],
+				...lastMessageOf(channel),
 			});
 		} else if (channel.type === 'GROUP_DM') {
 			channels.push({
@@ -124,6 +136,7 @@ function rawPrivateChannels(client: Client, filter: Filter): object[] {
 				name: channel.name,
 				icon: channel.icon,
 				recipients: channel.recipients.map(rawUser),
+				...lastMessageOf(channel),
 			});
 		}
 	}
