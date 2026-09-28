@@ -156,20 +156,21 @@ FILTER_RULES=[{"action":"deny","peerType":"user"},{"action":"deny","peerId":"-12
 
 ### Both producers
 
-| Variable         | Required | Default    | Meaning                                                                           |
-| ---------------- | -------- | ---------- | --------------------------------------------------------------------------------- |
-| `INGEST_URL`     | yes      |            | `wss://ingest.telecord.app/telegram/v1` or `wss://ingest.telecord.app/discord/v1` |
-| `INGEST_API_KEY` | yes      |            | Your Telecord API key for this account                                            |
-| `FILTER_RULES`   | no       | DMs denied | Ordered JSON rule list. See [Filters](#filters).                                  |
-| `FILTER_DEFAULT` | no       | `allow`    | `allow` or `deny`, used when no rule matches                                      |
+| Variable         | Required | Default    | Meaning                                                                                                      |
+| ---------------- | -------- | ---------- | ------------------------------------------------------------------------------------------------------------ |
+| `INGEST_URL`     | yes      |            | `wss://ingest.telecord.app/telegram/v1` or `wss://ingest.telecord.app/discord/v1`                            |
+| `INGEST_API_KEY` | yes      |            | Your Telecord API key for this account                                                                       |
+| `FILTER_RULES`   | no       | DMs denied | Ordered JSON rule list. See [Filters](#filters).                                                             |
+| `FILTER_DEFAULT` | no       | `allow`    | `allow` or `deny`, used when no rule matches                                                                 |
+| `INGEST_WINDOW`  | no       | `500`      | How many events may be sent and not yet acknowledged                                                         |
+| `DATA_DIR`       | no       | `/data`    | Where the outbox (`outbox.sqlite`) is stored, with the Telegram login session or the Discord gateway session |
 
 ### Telegram
 
-| Variable            | Required | Default | Meaning                                           |
-| ------------------- | -------- | ------- | ------------------------------------------------- |
-| `TELEGRAM_API_ID`   | yes      |         | From [my.telegram.org](https://my.telegram.org)   |
-| `TELEGRAM_API_HASH` | yes      |         | From [my.telegram.org](https://my.telegram.org)   |
-| `DATA_DIR`          | no       | `/data` | Where the login session and peer cache are stored |
+| Variable            | Required | Default | Meaning                                         |
+| ------------------- | -------- | ------- | ----------------------------------------------- |
+| `TELEGRAM_API_ID`   | yes      |         | From [my.telegram.org](https://my.telegram.org) |
+| `TELEGRAM_API_HASH` | yes      |         | From [my.telegram.org](https://my.telegram.org) |
 
 ### Discord
 
@@ -302,7 +303,7 @@ Both producers run:
 - with no Linux capabilities and `no-new-privileges`;
 - with a `/tmp` that is cleared on restart.
 
-Telegram also gets a `/data` volume for its login session. Discord stores nothing.
+Each producer also gets a `/data` volume for its outbox. On Telegram it also holds the login session. On Discord it holds the gateway session, which a restart resumes.
 
 ### Images
 

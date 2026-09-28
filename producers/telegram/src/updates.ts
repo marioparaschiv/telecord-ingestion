@@ -11,10 +11,17 @@ import {
 	type TelegramForwardedUpdate,
 	type TelegramUpdatePayload,
 } from '@telecord/ingest-client/telegram';
-import { asError, createTaggedLogger, isAllowed, type Filter } from '@telecord/producer-core';
+import {
+	asError,
+	createTaggedLogger,
+	isAllowed,
+	type Filter,
+	type Outbox,
+	type OutboxCapture,
+} from '@telecord/producer-core';
 
 import { fetchFullChat, replaceMinPeers, subjectOfMarkedId } from './peers';
-import { serialize } from './tl';
+import { deserialize, serialize } from './tl';
 
 type ForwardedUpdate = Extract<tl.TypeUpdate, { _: TelegramForwardedUpdate }>;
 
@@ -69,23 +76,33 @@ function chatIdOf(update: ForwardedUpdate): number | undefined {
 	}
 }
 
-function boxUpdate(update: ForwardedUpdate, peers: PeersIndex): TelegramUpdatePayload {
-	return {
-		data: serialize({
-			_: 'updates',
-			updates: [update],
-			users: [...peers.users.values()],
-			chats: [...peers.chats.values()],
-			date: Math.floor(Date.now() / 1000),
-			seq: 0,
-		}),
-	};
+/** The marked id of the channel a too-long difference is for, from the dialog it carries. */
+function channelOf({ dialog }: tl.updates.RawChannelDifferenceTooLong): number {
+	if (dialog._ !== 'dialog') {
+		throw new TypeError(`Expected the channel's dialog, got ${dialog._}`);
+	}
+
+	return getMarkedPeerId(dialog.peer);
+}
+
+function boxUpdate(update: ForwardedUpdate, peers: PeersIndex): Uint8Array<ArrayBuffer> {
+	return serialize({
+		_: 'updates',
+		updates: [update],
+		users: [...peers.users.values()],
+		chats: [...peers.chats.values()],
+		date: Math.floor(Date.now() / 1000),
+		seq: 0,
+	});
 }
 
 type UpdateForwarderOptions = {
 	client: TelegramClient;
 	filter: Filter;
-	send: (payload: TelegramUpdatePayload) => void;
+	/** Holds each update from the moment mtcute emits it until its frame is stored. */
+	outbox: Outbox;
+	/** Stores the frame built from a capture, releasing the capture with it. */
+	send: (payload: TelegramUpdatePayload, capture: number) => void;
 };
 
 /**
@@ -94,20 +111,35 @@ type UpdateForwarderOptions = {
  * in its own `updates` container with its peers, min peers replaced by the
  * session's complete copies and, for chat state and reactions, the full chat.
  *
+ * mtcute emits an update synchronously and saves its update state at the end
+ * of the tick, so each update is captured in the outbox before its handler
+ * returns; building the frame takes lookups and is done afterwards. Captures a
+ * previous run left unfinished are forwarded first, once `start` is called.
+ *
  * Updates are handled one at a time, in the order mtcute emitted them, so a
  * chat fetched for one update never lets a later update overtake it.
  *
- * @param options - The session, the filter rules and where frames go.
- * @returns The handlers to register on the client.
+ * @param options - The session, the filter rules, the outbox and where frames go.
+ * @returns The handlers to register on the client, and `start` to call once the session is ready.
  */
-export function createUpdateForwarder({ client, filter, send }: UpdateForwarderOptions) {
+export function createUpdateForwarder({ client, filter, outbox, send }: UpdateForwarderOptions) {
 	const logger = createTaggedLogger('Telegram Updates');
-	let queue = Promise.resolve();
+	const { promise: started, resolve: start } = Promise.withResolvers<void>();
+	let queue = started;
 
-	function enqueue(label: string, task: () => Promise<void>): void {
-		queue = queue.then(task).catch((error) => {
-			logger.error(`Failed to forward ${label}: ${asError(error).message}`);
-		});
+	function enqueue(
+		label: string,
+		capture: number,
+		task: () => Promise<TelegramUpdatePayload | undefined>,
+	): void {
+		queue = queue
+			.then(task)
+			.then((payload) => (payload ? send(payload, capture) : outbox.release(capture)))
+			.catch((error) => {
+				logger.error(
+					`Failed to forward ${label}, keeping it for the next start: ${asError(error).message}`,
+				);
+			});
 	}
 
 	async function attachFullChat(
@@ -134,16 +166,15 @@ export function createUpdateForwarder({ client, filter, send }: UpdateForwarderO
 		}
 	}
 
-	async function forwardUpdate({ update, peers }: RawUpdateInfo): Promise<void> {
-		if (!isForwarded(update)) {
-			return;
-		}
-
+	async function forwardUpdate(
+		update: ForwardedUpdate,
+		peers: PeersIndex,
+	): Promise<TelegramUpdatePayload | undefined> {
 		const chatId = chatIdOf(update);
 		const chat = chatId === undefined ? {} : await subjectOfMarkedId(client, chatId, peers);
 
 		if (!isAllowed(filter, { ...chat, update: update._ })) {
-			return;
+			return undefined;
 		}
 
 		await replaceMinPeers(client, peers);
@@ -152,47 +183,79 @@ export function createUpdateForwarder({ client, filter, send }: UpdateForwarderO
 			await attachFullChat(update, chatId, peers);
 		}
 
-		send(boxUpdate(update, peers));
+		return { data: boxUpdate(update, peers) };
 	}
 
 	/** A channel gap too long to replay: its difference is forwarded whole, with its recent messages. */
 	async function forwardChannelTooLong(
-		channelId: number,
 		difference: tl.updates.RawChannelDifferenceTooLong,
-	): Promise<void> {
+	): Promise<TelegramUpdatePayload | undefined> {
 		const peers = PeersIndex.from(difference);
-		const subject = await subjectOfMarkedId(
-			client,
-			getMarkedPeerId(channelId, 'channel'),
-			peers,
-		);
+		const subject = await subjectOfMarkedId(client, channelOf(difference), peers);
 
 		if (!isAllowed(filter, subject)) {
-			return;
+			return undefined;
 		}
 
 		await replaceMinPeers(client, peers);
 
-		send({
+		return {
 			data: serialize({
 				...difference,
 				users: [...peers.users.values()],
 				chats: [...peers.chats.values()],
 			}),
-		});
+		};
+	}
+
+	function enqueueUpdate(update: ForwardedUpdate, peers: PeersIndex, capture: number): void {
+		enqueue(update._, capture, () => forwardUpdate(update, peers));
+	}
+
+	function enqueueChannelTooLong(
+		difference: tl.updates.RawChannelDifferenceTooLong,
+		capture: number,
+	): void {
+		enqueue('a channel difference', capture, () => forwardChannelTooLong(difference));
+	}
+
+	function replay({ id, data }: OutboxCapture): void {
+		const captured = deserialize(data);
+
+		switch (captured._) {
+			case 'updates.channelDifferenceTooLong':
+				enqueueChannelTooLong(captured, id);
+
+				return;
+
+			case 'updates': {
+				const [update] = captured.updates;
+
+				if (update && isForwarded(update)) {
+					enqueueUpdate(update, PeersIndex.from(captured), id);
+
+					return;
+				}
+			}
+		}
+
+		logger.error(`Discarded capture ${id}: ${captured._} is not a forwarded update`);
+		outbox.release(id);
+	}
+
+	for (const capture of outbox.captures()) {
+		replay(capture);
 	}
 
 	return {
-		onRawUpdate(info: RawUpdateInfo): void {
-			enqueue(info.update._, () => forwardUpdate(info));
+		start,
+		onRawUpdate({ update, peers }: RawUpdateInfo): void {
+			if (isForwarded(update)) {
+				enqueueUpdate(update, peers, outbox.capture(boxUpdate(update, peers)));
+			}
 		},
-		onChannelTooLong(
-			channelId: number,
-			difference: tl.updates.RawChannelDifferenceTooLong,
-		): void {
-			enqueue(`the difference of channel ${channelId}`, () =>
-				forwardChannelTooLong(channelId, difference),
-			);
+		onChannelTooLong(difference: tl.updates.RawChannelDifferenceTooLong): void {
+			enqueueChannelTooLong(difference, outbox.capture(serialize(difference)));
 		},
 	};
 }

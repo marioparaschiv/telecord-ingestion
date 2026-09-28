@@ -51,6 +51,24 @@ export class FakeProducerSocket {
 	}
 
 	/**
+	 * Answers the producer's `IDENTIFY` with `READY`, as the server does once it is verified.
+	 *
+	 * @param lastSeq - The last event of the stream the server holds.
+	 * @returns The `IDENTIFY` frame.
+	 */
+	async ready(lastSeq = 0): Promise<IngestEnvelope> {
+		const identify = await this.nextFrame();
+
+		if (identify.op !== IngestOpcode.IDENTIFY) {
+			throw new Error(`Expected IDENTIFY, got ${identify.op}`);
+		}
+
+		this.send(IngestOpcode.READY, { lastSeq });
+
+		return identify;
+	}
+
+	/**
 	 * The next frame the producer sent.
 	 *
 	 * @returns The decoded frame.

@@ -1,9 +1,18 @@
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { PeersIndex, RawUpdateInfo, type tl } from '@mtcute/node';
-import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { TelegramUpdate } from '@telecord/ingest-client/telegram';
+import { Outbox } from '@telecord/producer-core';
 
-import { decodeObject, narrow, startHarness, vectorUpdates, type Harness } from './fixtures';
+import {
+	DEFAULT_FILTER,
+	decodeObject,
+	narrow,
+	startHarness,
+	vectorUpdates,
+	type Harness,
+} from './fixtures';
+import { createUpdateForwarder } from '../src/updates';
 import { serialize } from '../src/tl';
 
 const CHANNEL_ID = 1_987_654_321;
@@ -33,6 +42,37 @@ function vectorPeers() {
 	}
 
 	return { user, channel };
+}
+
+/** A too-long difference of the vectors' channel, carrying its one message. */
+function channelDifference(): tl.updates.RawChannelDifferenceTooLong {
+	const { user, channel } = vectorPeers();
+	const [update] = vectorUpdates().updates;
+
+	if (update?._ !== 'updateNewChannelMessage') {
+		throw new Error('event/update carries no channel message');
+	}
+
+	return {
+		_: 'updates.channelDifferenceTooLong',
+		final: true,
+		dialog: {
+			_: 'dialog',
+			peer: { _: 'peerChannel', channelId: CHANNEL_ID },
+			topMessage: update.message.id,
+			readInboxMaxId: 0,
+			readOutboxMaxId: 0,
+			unreadCount: 1,
+			unreadMentionsCount: 0,
+			unreadReactionsCount: 0,
+			unreadPollVotesCount: 0,
+			notifySettings: { _: 'peerNotifySettings' },
+			pts: 6_000,
+		},
+		messages: [update.message],
+		chats: [channel],
+		users: [user],
+	};
 }
 
 describe('Telegram update forwarding', () => {
@@ -135,36 +175,59 @@ describe('Telegram update forwarding', () => {
 	it('forwards a channel difference too long to replay as it came', async () => {
 		harness = await startHarness();
 
-		const { user, channel } = vectorPeers();
-		const [update] = vectorUpdates().updates;
+		const difference = channelDifference();
 
-		if (update?._ !== 'updateNewChannelMessage') {
-			throw new Error('event/update carries no channel message');
-		}
-
-		const difference: tl.updates.RawChannelDifferenceTooLong = {
-			_: 'updates.channelDifferenceTooLong',
-			final: true,
-			dialog: {
-				_: 'dialog',
-				peer: { _: 'peerChannel', channelId: CHANNEL_ID },
-				topMessage: update.message.id,
-				readInboxMaxId: 0,
-				readOutboxMaxId: 0,
-				unreadCount: 1,
-				unreadMentionsCount: 0,
-				unreadReactionsCount: 0,
-				unreadPollVotesCount: 0,
-				notifySettings: { _: 'peerNotifySettings' },
-				pts: 6_000,
-			},
-			messages: [update.message],
-			chats: [channel],
-			users: [user],
-		};
-
-		harness.producer.updates.onChannelTooLong(CHANNEL_ID, difference);
+		harness.producer.updates.onChannelTooLong(difference);
 
 		expect(await nextForwarded()).toEqual(decodeObject(serialize(difference)));
+	});
+
+	it('forwards what a previous run captured but never stored, ahead of new updates', async () => {
+		harness = await startHarness();
+
+		const { client } = harness;
+		const outbox = new Outbox(':memory:');
+
+		onTestFinished(() => outbox.close());
+
+		const send = (payload: { data: Uint8Array }, capture: number) =>
+			outbox.append(() => payload.data, capture);
+		const container = vectorUpdates();
+		const [update] = container.updates;
+		const stopped = createUpdateForwarder({ client, filter: DEFAULT_FILTER, outbox, send });
+
+		if (!update) {
+			throw new Error('event/update carries no update');
+		}
+
+		stopped.onRawUpdate(new RawUpdateInfo(update, PeersIndex.from(container)));
+		stopped.onChannelTooLong(channelDifference());
+
+		expect(outbox.captures()).toHaveLength(2);
+
+		const restarted = createUpdateForwarder({ client, filter: DEFAULT_FILTER, outbox, send });
+
+		restarted.onRawUpdate(
+			new RawUpdateInfo(
+				{ _: 'updateDeleteMessages', messages: [1], pts: 10, ptsCount: 1 },
+				new PeersIndex(),
+			),
+		);
+		restarted.start();
+
+		await vi.waitFor(() => expect(outbox.size).toBe(3));
+
+		const forwarded = outbox.after(0, 3).map(({ frame }) => {
+			const object = decodeObject(frame);
+
+			return object._ === 'updates' ? object.updates[0]?._ : object._;
+		});
+
+		expect(forwarded).toEqual([
+			'updateNewChannelMessage',
+			'updates.channelDifferenceTooLong',
+			'updateDeleteMessages',
+		]);
+		expect(outbox.captures()).toEqual([]);
 	});
 });

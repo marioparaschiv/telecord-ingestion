@@ -29,6 +29,24 @@ export function serialize(object: tl.TlObject): Uint8Array<ArrayBuffer> {
 }
 
 /**
+ * Reads one boxed TL object serialized at the session's layer.
+ *
+ * @param bytes - The object's bytes.
+ * @returns The object.
+ * @throws When the bytes are not a boxed object.
+ */
+export function deserialize(bytes: Uint8Array): tl.TlObject {
+	const object: unknown = new TlBinaryReader(__tlReaderMap, bytes).object();
+
+	if (typeof object !== 'object' || object === null || !('_' in object)) {
+		throw new TypeError('Expected a boxed TL object');
+	}
+
+	// The reader is untyped; a boxed value with a constructor name is a TL object.
+	return object as tl.TlObject;
+}
+
+/**
  * Serializes a boxed `Vector` of TL objects.
  *
  * @param objects - The vector's entries.

@@ -207,8 +207,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/producer-core
       discord.js-selfbot-v13:
-        specifier: github:marioparaschiv/FORK.Discord.Self#3e6baf2
-        version: https://codeload.github.com/marioparaschiv/FORK.Discord.Self/tar.gz/3e6baf22232a4b8c21a220db4d786c298c3cde4b(supports-color@7.2.0)
+        specifier: github:marioparaschiv/FORK.Discord.Self#0ff78cda868b061e536fbbc5d7d8bd47f0eb39f2
+        version: https://codeload.github.com/marioparaschiv/FORK.Discord.Self/tar.gz/0ff78cda868b061e536fbbc5d7d8bd47f0eb39f2(supports-color@7.2.0)
       zod:
         specifier: 'catalog:'
         version: 4.6.5
@@ -1215,8 +1215,8 @@ packages:
   discord-api-types@0.38.55:
     resolution: {integrity: sha512-ytuaRTzdnHUCXJ6KjL9MrItQX0xKncBKEeYI1Bst4+ud47eejH3cG6gaesYakjpPcUhh68XYS2YwGq3mmujFsA==}
 
-  discord.js-selfbot-v13@https://codeload.github.com/marioparaschiv/FORK.Discord.Self/tar.gz/3e6baf22232a4b8c21a220db4d786c298c3cde4b:
-    resolution: {gitHosted: true, integrity: sha512-jrUQ+xTsml2OiH/nM0/fUpJCK8dJwRBYVp0Ss2UlD0WG6PRp1DFHuchotjmW2J4qH4sr23EwgcpPNg7WIdczAQ==, tarball: https://codeload.github.com/marioparaschiv/FORK.Discord.Self/tar.gz/3e6baf22232a4b8c21a220db4d786c298c3cde4b}
+  discord.js-selfbot-v13@https://codeload.github.com/marioparaschiv/FORK.Discord.Self/tar.gz/0ff78cda868b061e536fbbc5d7d8bd47f0eb39f2:
+    resolution: {gitHosted: true, integrity: sha512-3PwIPJSWPrBwDqNDIIzrOyeBWrkbqt+Eof5DVeLki6j/3o3cEvDbuhEs8QTqEHe50a+3H7033TCIC6hbITF9bg==, tarball: https://codeload.github.com/marioparaschiv/FORK.Discord.Self/tar.gz/0ff78cda868b061e536fbbc5d7d8bd47f0eb39f2}
     version: 3.7.1
     engines: {node: '>=20.18'}
 
@@ -3005,7 +3005,7 @@ snapshots:
 
   discord-api-types@0.38.55: {}
 
-  discord.js-selfbot-v13@https://codeload.github.com/marioparaschiv/FORK.Discord.Self/tar.gz/3e6baf22232a4b8c21a220db4d786c298c3cde4b(supports-color@7.2.0):
+  discord.js-selfbot-v13@https://codeload.github.com/marioparaschiv/FORK.Discord.Self/tar.gz/0ff78cda868b061e536fbbc5d7d8bd47f0eb39f2(supports-color@7.2.0):
     dependencies:
       '@discordjs/builders': 1.14.1
       '@discordjs/collection': 2.1.1
