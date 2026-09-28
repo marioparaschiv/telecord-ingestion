@@ -7,13 +7,17 @@ export type VectorBindings = {
 	key: string;
 	foreignKey: string;
 	unboundKey: string;
-	parkLimit: number;
+	/** The account id `{key}` is bound to: a number on Telegram, a snowflake string on Discord. */
+	platformUserId: number | string;
+	otherUserId: number | string;
+	streamId: string;
 };
 
 const FrameSchema = z.object({
 	op: z.string(),
 	d: z.unknown().optional(),
 	nonce: z.string().optional(),
+	seq: z.number().optional(),
 });
 
 const ConnectVectorSchema = z.object({
@@ -29,15 +33,26 @@ const ConnectVectorSchema = z.object({
 	chatsFetch: z.boolean().optional(),
 });
 
+const IdentifyVectorSchema = z.object({
+	id: z.string(),
+	kind: z.literal('identify'),
+	description: z.string(),
+	send: FrameSchema.optional(),
+	expect: z.union([
+		z.object({ close: z.object({ code: z.number(), reason: z.string() }) }),
+		z.object({ chatsFetch: z.boolean() }),
+		z.object({ frame: FrameSchema }),
+	]),
+});
+
 const EventVectorSchema = z.object({
 	id: z.string(),
 	kind: z.literal('event'),
 	description: z.string(),
 	url: z.string().optional(),
 	send: FrameSchema,
-	outcome: z.enum(['accepted', 'refused', 'parked']),
+	outcome: z.enum(['accepted', 'refused', 'held']),
 	expect: FrameSchema,
-	alreadyParked: z.number().optional(),
 });
 
 const RequestVectorSchema = z.object({
@@ -50,10 +65,24 @@ const RequestVectorSchema = z.object({
 	chats: z.array(z.string()).optional(),
 });
 
+const StreamVectorSchema = z.object({
+	id: z.string(),
+	kind: z.literal('stream'),
+	description: z.string(),
+	steps: z.array(z.object({ send: FrameSchema, expect: FrameSchema })),
+});
+
 const VectorFileSchema = z.object({
 	url: z.string(),
+	identify: FrameSchema,
 	vectors: z.array(
-		z.discriminatedUnion('kind', [ConnectVectorSchema, EventVectorSchema, RequestVectorSchema]),
+		z.discriminatedUnion('kind', [
+			ConnectVectorSchema,
+			IdentifyVectorSchema,
+			EventVectorSchema,
+			StreamVectorSchema,
+			RequestVectorSchema,
+		]),
 	),
 });
 
@@ -67,7 +96,8 @@ export type RequestVector = z.output<typeof RequestVectorSchema>;
 
 export type VectorFile = z.output<typeof VectorFileSchema>;
 
-const PLACEHOLDER = /\{(min|max|min-1|max\+1|key|foreignKey|unboundKey|parkLimit)\}/g;
+const PLACEHOLDER =
+	/\{(min|max|min-1|max\+1|key|foreignKey|unboundKey|platformUserId|otherUserId|streamId)\}/g;
 
 function placeholderValue(name: string, bindings: VectorBindings): string | number {
 	switch (name) {
@@ -82,7 +112,9 @@ function placeholderValue(name: string, bindings: VectorBindings): string | numb
 		case 'key':
 		case 'foreignKey':
 		case 'unboundKey':
-		case 'parkLimit':
+		case 'platformUserId':
+		case 'otherUserId':
+		case 'streamId':
 			return bindings[name];
 
 		default:

@@ -1,13 +1,13 @@
-import { randomUUID } from 'node:crypto';
 import { WebSocket } from 'ws';
 
 import {
 	INGEST_API_KEY_PARAM,
+	IngestAckSchema,
 	IngestCloseCode,
-	IngestErrorCode,
 	IngestErrorSchema,
 	IngestHelloSchema,
 	IngestOpcode,
+	IngestReadySchema,
 	MAX_FRAME_SIZE,
 	decodeFrame,
 	encodeFrame,
@@ -16,8 +16,8 @@ import {
 } from '@telecord/ingest-client';
 
 import type { RequestHandler } from './requests';
+import type Outbox from './outbox';
 
-import UnackedBuffer from './unacked-buffer';
 import createTaggedLogger from './logger';
 import rawDataBytes from './raw-data';
 import asError from './as-error';
@@ -31,18 +31,8 @@ const HANDSHAKE_TIMEOUT = 30_000;
 /** Heartbeat intervals without a server `PING` after which the connection is presumed dead. */
 const MISSED_PINGS_LIMIT = 2;
 
-/** How long a frame the server could not take yet waits before it is sent again. */
-export const RESEND_DELAY = 30_000;
-
-/** Errors after which sending the same frame again fails the same way. */
-const UNRECOVERABLE_ERRORS = new Set<string>([
-	IngestErrorCode.VALIDATION_ERROR,
-	IngestErrorCode.UNKNOWN_OPCODE,
-	IngestErrorCode.MISSING_PERMISSION,
-]);
-
-/** The one `4001` reason a retry can fix: the server failed while checking the key. */
-const TRANSIENT_AUTHENTICATION_REASON = 'Authentication error';
+/** The `4001` reasons a retry can fix: the server failed while checking the key or storing the user. */
+const TRANSIENT_AUTHENTICATION_REASONS = new Set(['Authentication error', 'Identification error']);
 
 /** The status an unknown route or route version is refused with before the key is read. */
 const UNKNOWN_ROUTE_STATUS = 404;
@@ -57,6 +47,12 @@ type ConnectionOptions = {
 	versionParam: string;
 	/** The TL layer or gateway API version every forwarded payload is shaped by. */
 	version: number;
+	/** The stream every forwarded event is stored in and read back from. */
+	outbox: Outbox;
+	/** The most events sent and not yet acknowledged. */
+	window: number;
+	/** The account the producer is logged in as, as `IDENTIFY` names it without the stream id. */
+	identify: () => Promise<object>;
 	/** How each request opcode is answered. */
 	requests: Readonly<Partial<Record<string, RequestHandler>>>;
 	/** Called once the server refuses the connection in a way reconnecting cannot fix. */
@@ -69,46 +65,43 @@ function isFatalClose(code: number, reason: string): boolean {
 	}
 
 	return (
-		code === IngestCloseCode.AUTHENTICATION_FAILED && reason !== TRANSIENT_AUTHENTICATION_REASON
+		code === IngestCloseCode.AUTHENTICATION_FAILED &&
+		!TRANSIENT_AUTHENTICATION_REASONS.has(reason)
 	);
 }
 
 /**
  * One producer's link to the ingest server, kept alive across drops.
  *
- * Event frames are delivered at least once and in order: each waits in the
- * unacknowledged buffer, and only the oldest is on the wire at a time, because
- * the server handles frames concurrently and an edit sent ahead of its create's
- * `ACK` could be applied first. After a reconnect the buffer is resent from the
- * oldest frame once `HELLO` arrives.
+ * Forwarded events are stored in the outbox under their `seq` and streamed
+ * from it: nothing is sent before the server answers `IDENTIFY` with `READY`,
+ * every `READY` (the answer to `IDENTIFY`, or a rewind after a gap) restarts
+ * the stream at `lastSeq + 1`, at most `window` events are unacknowledged at a
+ * time, and a cumulative `ACK` deletes every event it covers. Request results
+ * are not events: they are sent live and never stored.
  *
  * Requests are answered as they arrive, through the handler registered for
- * their opcode. A close that only a configuration change or an upgrade fixes
- * stops the connection and calls `onFatal`; anything else reconnects with
- * exponential backoff.
+ * their opcode. A close that only a configuration change or an upgrade fixes,
+ * or another producer taking over the stream, stops the connection and calls
+ * `onFatal`; anything else reconnects with exponential backoff.
  */
 class IngestConnection {
 	private logger = createTaggedLogger('Ingest Connection');
-	private buffer = new UnackedBuffer();
 	private socket: WebSocket | undefined;
-	/** Whether the current socket received `HELLO`; event frames wait until it has. */
-	private greeted = false;
+	/** Whether the current socket received `READY`; events wait until it has. */
+	private ready = false;
+	/** The highest `seq` the server has stored. */
+	private acknowledged = 0;
+	/** The highest `seq` sent on the current stream. */
+	private sent = 0;
 	private maxFrameSize = MAX_FRAME_SIZE;
 	private silenceLimit = HANDSHAKE_TIMEOUT;
-	/** The nonce of the event frame awaiting its answer. */
-	private inFlight: string | undefined;
 	private attempt = 0;
 	private stopped = false;
 	private silenceTimer: NodeJS.Timeout | undefined;
 	private reconnectTimer: NodeJS.Timeout | undefined;
-	private resendTimer: NodeJS.Timeout | undefined;
 
 	constructor(private options: ConnectionOptions) {}
-
-	/** How many event frames are waiting for their `ACK`. */
-	get unacknowledged(): number {
-		return this.buffer.size;
-	}
 
 	start(): void {
 		this.stopped = false;
@@ -117,32 +110,39 @@ class IngestConnection {
 
 	stop(): void {
 		this.stopped = true;
+		this.ready = false;
 
 		clearTimeout(this.silenceTimer);
 		clearTimeout(this.reconnectTimer);
-		clearTimeout(this.resendTimer);
 
 		this.socket?.close(1000, 'Producer shutting down');
 	}
 
 	/**
-	 * Queues an event frame under a fresh nonce. It is sent once the connection
-	 * is greeted and every older frame is acknowledged.
+	 * Stores an event under the next `seq` and sends it once the stream reaches it.
 	 *
 	 * @param op - The event opcode.
 	 * @param payload - The frame's payload.
+	 * @param capture - The outbox capture the event was built from, released with it.
 	 */
-	send(op: IngestFrameOpcode, payload: object): void {
-		const nonce = randomUUID();
-		const dropped = this.buffer.push(nonce, encodeFrame(op, payload, nonce));
+	send(op: IngestFrameOpcode, payload: object, capture?: number): void {
+		const seq = this.options.outbox.append((next) => {
+			const frame = encodeFrame(op, payload, undefined, next);
 
-		if (dropped !== undefined) {
-			this.logger.warn(
-				`Dropped unacknowledged frame ${dropped}: buffer full, ${this.buffer.dropped} lost so far`,
+			if (frame.byteLength <= this.maxFrameSize) {
+				return frame;
+			}
+
+			this.logger.error(
+				`Dropped ${op}: ${frame.byteLength} bytes exceeds the ${this.maxFrameSize} byte limit`,
 			);
-		}
 
-		this.pump();
+			return undefined;
+		}, capture);
+
+		if (seq !== undefined) {
+			this.pump();
+		}
 	}
 
 	private connect(): void {
@@ -156,12 +156,9 @@ class IngestConnection {
 		let refusedStatus: number | undefined;
 
 		this.socket = socket;
-		this.greeted = false;
-		this.inFlight = undefined;
+		this.ready = false;
 		this.silenceLimit = HANDSHAKE_TIMEOUT;
 
-		clearTimeout(this.resendTimer);
-		this.resendTimer = undefined;
 		this.watchSilence(socket);
 
 		socket.on('unexpected-response', (_request, response) => {
@@ -201,6 +198,11 @@ class IngestConnection {
 
 				return;
 
+			case IngestOpcode.READY:
+				this.resume(socket, envelope.d);
+
+				return;
+
 			case IngestOpcode.PING:
 				this.watchSilence(socket);
 				socket.send(encodeFrame(IngestOpcode.PONG));
@@ -208,7 +210,7 @@ class IngestConnection {
 				return;
 
 			case IngestOpcode.ACK:
-				this.acknowledge(envelope.nonce);
+				this.acknowledge(envelope.d);
 
 				return;
 
@@ -242,14 +244,13 @@ class IngestConnection {
 		const { heartbeatInterval, versions, maxFrameSize, deprecation } = hello.data;
 		const { versionParam, version } = this.options;
 
-		this.greeted = true;
 		this.attempt = 0;
 		this.maxFrameSize = maxFrameSize;
 		this.silenceLimit = heartbeatInterval * MISSED_PINGS_LIMIT;
 		this.watchSilence(socket);
 
 		this.logger.info(
-			`Connected with ${versionParam} ${version} (window ${versions.min}-${versions.max}), ${this.buffer.size} frames to send`,
+			`Connected with ${versionParam} ${version} (window ${versions.min}-${versions.max})`,
 		);
 
 		if (deprecation) {
@@ -260,97 +261,126 @@ class IngestConnection {
 
 		if (version > versions.max) {
 			this.logger.warn(
-				`${versionParam} ${version} is newer than the server supports: events are parked and no snapshot is requested`,
+				`${versionParam} ${version} is newer than the server supports: events are held and no snapshot is requested`,
 			);
 		}
 
-		this.pump();
+		void this.identify(socket);
 	}
 
-	private acknowledge(nonce: string | undefined): void {
-		if (nonce === undefined) {
-			this.logger.warn('Discarded an ACK without a nonce');
+	private async identify(socket: WebSocket): Promise<void> {
+		const { identify, outbox } = this.options;
+
+		try {
+			const identity = await identify();
+
+			this.write(
+				socket,
+				encodeFrame(IngestOpcode.IDENTIFY, { ...identity, streamId: outbox.streamId }),
+			);
+		} catch (error) {
+			this.logger.error(`Failed to identify, reconnecting: ${asError(error).message}`);
+			socket.terminate();
+		}
+	}
+
+	/** Restarts the stream after `lastSeq`, whether `READY` answers `IDENTIFY` or rewinds past a gap. */
+	private resume(socket: WebSocket, payload: unknown): void {
+		const ready = IngestReadySchema.safeParse(payload);
+
+		if (!ready.success) {
+			this.logger.error(`Malformed READY, reconnecting: ${ready.error.message}`);
+			socket.terminate();
 
 			return;
 		}
 
-		this.buffer.delete(nonce);
-		this.settle(nonce);
+		const { lastSeq } = ready.data;
+		const { outbox } = this.options;
+
+		outbox.acknowledge(lastSeq);
+		outbox.fastForward(lastSeq);
+
+		const [first] = outbox.after(lastSeq, 1);
+
+		if (first && first.seq > lastSeq + 1) {
+			this.logger.error(
+				`The outbox no longer holds events ${lastSeq + 1}-${first.seq - 1} of stream ${outbox.streamId}: streaming from ${first.seq}`,
+			);
+		}
+
+		this.logger.info(
+			`${this.ready ? 'Rewinding' : 'Streaming'} from ${lastSeq + 1}, ${outbox.size} events to send`,
+		);
+
+		this.ready = true;
+		this.acknowledged = lastSeq;
+		this.sent = lastSeq;
+		this.pump();
 	}
 
-	private refused({ d, nonce }: IngestEnvelope): void {
+	private acknowledge(payload: unknown): void {
+		const ack = IngestAckSchema.safeParse(payload);
+
+		if (!ack.success) {
+			this.logger.warn(`Discarded a malformed ACK: ${ack.error.message}`);
+
+			return;
+		}
+
+		const { seq } = ack.data;
+
+		if (seq <= this.acknowledged) {
+			return;
+		}
+
+		this.options.outbox.acknowledge(seq);
+		this.acknowledged = seq;
+		this.sent = Math.max(this.sent, seq);
+		this.pump();
+	}
+
+	/** An event the server refused still counts as consumed; the `ACK` that follows deletes it. */
+	private refused({ d }: IngestEnvelope): void {
 		const error = IngestErrorSchema.safeParse(d);
-		const description = error.success
-			? `${error.data.code}: ${error.data.message}`
-			: 'a malformed ERROR';
 
-		if (nonce === undefined) {
-			this.logger.error(`Server answered a frame without a nonce with ${description}`);
+		if (!error.success) {
+			this.logger.error('Server answered with a malformed ERROR');
 
 			return;
 		}
 
-		if (error.success && UNRECOVERABLE_ERRORS.has(error.data.code)) {
-			this.logger.warn(`Dropped frame ${nonce}, the server refused it with ${description}`);
-			this.buffer.delete(nonce);
-		} else if (this.buffer.has(nonce)) {
-			this.logger.warn(
-				`Server could not take frame ${nonce} yet (${description}), resending in ${RESEND_DELAY}ms`,
-			);
-			this.scheduleResend();
-		}
+		const { code, message, seq } = error.data;
 
-		this.settle(nonce);
+		this.logger.warn(
+			seq === undefined
+				? `Server answered with ${code}: ${message}`
+				: `Server refused event ${seq} with ${code}: ${message}`,
+		);
 	}
 
-	/** Frees the wire for the next frame once the in-flight one is answered. */
-	private settle(nonce: string): void {
-		if (nonce !== this.inFlight) {
-			return;
-		}
-
-		this.inFlight = undefined;
-		this.pump();
-	}
-
-	private scheduleResend(): void {
-		if (this.resendTimer !== undefined) {
-			return;
-		}
-
-		this.resendTimer = setTimeout(() => {
-			this.resendTimer = undefined;
-			this.pump();
-		}, RESEND_DELAY);
-	}
-
+	/**
+	 * Sends the events after the last one sent, up to the window. The window is
+	 * counted from the last acknowledged `seq`, so a stream that starts past a gap
+	 * the server skips sends the same number of events.
+	 */
 	private pump(): void {
 		const socket = this.socket;
 
-		if (!socket || !this.greeted || this.inFlight !== undefined || this.resendTimer) {
+		if (!socket || !this.ready) {
 			return;
 		}
 
-		let next = this.buffer.first();
+		const room = this.acknowledged + this.options.window - this.sent;
 
-		while (next && next[1].byteLength > this.maxFrameSize) {
-			const [nonce, frame] = next;
-
-			this.logger.error(
-				`Dropped frame ${nonce}: ${frame.byteLength} bytes exceeds the ${this.maxFrameSize} byte limit`,
-			);
-			this.buffer.delete(nonce);
-			next = this.buffer.first();
-		}
-
-		if (!next) {
+		if (room <= 0) {
 			return;
 		}
 
-		const [nonce, frame] = next;
-
-		this.inFlight = nonce;
-		socket.send(frame);
+		for (const { seq, frame } of this.options.outbox.after(this.sent, room)) {
+			socket.send(frame);
+			this.sent = seq;
+		}
 	}
 
 	private async answer(
@@ -415,8 +445,7 @@ class IngestConnection {
 		clearTimeout(this.silenceTimer);
 
 		this.socket = undefined;
-		this.greeted = false;
-		this.inFlight = undefined;
+		this.ready = false;
 
 		if (this.stopped) {
 			return;
@@ -424,6 +453,16 @@ class IngestConnection {
 
 		const description =
 			refusedStatus === undefined ? `${code} ${reason}`.trim() : `HTTP ${refusedStatus}`;
+
+		if (code === IngestCloseCode.SUPERSEDED) {
+			this.stopped = true;
+			this.logger.error(
+				`Another producer identified on stream ${this.options.outbox.streamId} and took it over: two producers share this outbox, stopping this one`,
+			);
+			this.options.onFatal(description);
+
+			return;
+		}
 
 		if (refusedStatus === UNKNOWN_ROUTE_STATUS || isFatalClose(code, reason)) {
 			this.stopped = true;
@@ -437,7 +476,7 @@ class IngestConnection {
 
 		this.attempt++;
 		this.logger.warn(
-			`Disconnected (${description}), reconnecting in ${delay}ms with ${this.buffer.size} frames unacknowledged`,
+			`Disconnected (${description}), reconnecting in ${delay}ms with ${this.options.outbox.size} events unacknowledged`,
 		);
 		this.reconnectTimer = setTimeout(() => this.connect(), delay);
 	}
