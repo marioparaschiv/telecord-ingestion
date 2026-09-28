@@ -1,4 +1,4 @@
-import type { TelegramClient, tl } from '@mtcute/node';
+import type { Dialog, TelegramClient, tl } from '@mtcute/node';
 
 import {
 	asError,
@@ -8,7 +8,11 @@ import {
 	type Filter,
 	type RequestHandler,
 } from '@telecord/producer-core';
-import { TelegramChatsPart, TelegramOpcode } from '@telecord/ingest-client/telegram';
+import {
+	TelegramChatsPart,
+	TelegramOpcode,
+	type TelegramChatsPartPayload,
+} from '@telecord/ingest-client/telegram';
 import { CHATS_PART_MAX_CHATS } from '@telecord/ingest-client';
 
 import { fetchFullChat, isComplete, markedIdOf, subjectOfRaw } from './peers';
@@ -28,7 +32,9 @@ const SNAPSHOT_MAX_TOPICS = 100_000;
 
 const logger = createTaggedLogger('Telegram Snapshot');
 
-type TelegramChatsPartFields = {
+type TopMessage = NonNullable<TelegramChatsPartPayload['topMessages']>[number];
+
+type TelegramChatsPartFields = Pick<TelegramChatsPartPayload, 'topMessages'> & {
 	chats: Uint8Array<ArrayBuffer>;
 	users: Uint8Array<ArrayBuffer>;
 	topics: Uint8Array<ArrayBuffer>[];
@@ -37,13 +43,24 @@ type TelegramChatsPartFields = {
 function toPart(
 	chats: readonly tl.TypeChat[],
 	users: readonly tl.TypeUser[],
+	topMessages: readonly TopMessage[],
 	topics: readonly tl.messages.RawForumTopics[] = [],
 ): TelegramChatsPartFields {
 	return {
 		chats: serializeVector(chats),
 		users: serializeVector(users),
 		topics: topics.map((page) => serialize(page)),
+		...(topMessages.length > 0 && { topMessages: [...topMessages] }),
 	};
+}
+
+/** A dialog's newest message under its marked peer id, or undefined for a dialog without one. */
+function topMessageOf({ peer, raw }: Dialog): TopMessage | undefined {
+	if (raw.topMessage <= 0) {
+		return undefined;
+	}
+
+	return { peerId: String(peer.id), messageId: raw.topMessage };
 }
 
 /**
@@ -134,8 +151,8 @@ async function completeChat(client: TelegramClient, chat: tl.TypeChat): Promise<
 /**
  * The account's chats as snapshot parts, walked from its dialogs: each forum
  * in a part of its own with its topic pages, every other chat and private
- * chat counterpart batched up to the per-part cap. Chats the filter rules
- * block are left out.
+ * chat counterpart batched up to the per-part cap. Each part names the newest
+ * message of its chats. Chats the filter rules block are left out.
  *
  * Forums are walked one after another, since Telegram flood-limits bursts of
  * topic requests, and each part is yielded as soon as it is complete.
@@ -146,10 +163,13 @@ async function* snapshotParts(
 ): AsyncGenerator<TelegramChatsPartFields> {
 	let chats: tl.TypeChat[] = [];
 	let users: tl.TypeUser[] = [];
+	let topMessages: TopMessage[] = [];
 	let peerCount = 0;
 	let topicCount = 0;
 
-	for await (const { peer } of client.iterDialogs({ archived: 'keep' })) {
+	for await (const dialog of client.iterDialogs({ archived: 'keep' })) {
+		const { peer } = dialog;
+
 		if (!isAllowed(filter, subjectOfRaw(peer.raw))) {
 			continue;
 		}
@@ -157,6 +177,8 @@ async function* snapshotParts(
 		if (++peerCount > SNAPSHOT_MAX_PEERS) {
 			throw new Error(`The account has more than ${SNAPSHOT_MAX_PEERS} chats`);
 		}
+
+		const topMessage = topMessageOf(dialog);
 
 		if (peer.raw._ === 'user') {
 			users.push(peer.raw);
@@ -182,6 +204,7 @@ async function* snapshotParts(
 					yield toPart(
 						start === 0 ? [chat] : [],
 						[],
+						start === 0 && topMessage ? [topMessage] : [],
 						pages.slice(start, start + PART_MAX_TOPIC_PAGES),
 					);
 				}
@@ -192,15 +215,20 @@ async function* snapshotParts(
 			chats.push(chat);
 		}
 
+		if (topMessage) {
+			topMessages.push(topMessage);
+		}
+
 		if (chats.length === CHATS_PART_MAX_CHATS || users.length === CHATS_PART_MAX_CHATS) {
-			yield toPart(chats, users);
+			yield toPart(chats, users, topMessages);
 			chats = [];
 			users = [];
+			topMessages = [];
 		}
 	}
 
 	if (chats.length > 0 || users.length > 0) {
-		yield toPart(chats, users);
+		yield toPart(chats, users, topMessages);
 	}
 }
 

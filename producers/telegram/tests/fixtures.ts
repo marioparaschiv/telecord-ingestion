@@ -264,18 +264,20 @@ export async function seedPeers(
  * @param peer - The dialog's peer.
  * @param chats - The chats the dialog list carried.
  * @param users - The users the dialog list carried.
+ * @param topMessage - The id of the dialog's newest message, 0 for none.
  * @returns The dialog.
  */
 export function dialogOf(
 	peer: tl.TypePeer,
 	chats: tl.TypeChat[] = [],
 	users: tl.TypeUser[] = [],
+	topMessage = 0,
 ): Dialog {
 	return new Dialog(
 		{
 			_: 'dialog',
 			peer,
-			topMessage: 0,
+			topMessage,
 			readInboxMaxId: 0,
 			readOutboxMaxId: 0,
 			unreadCount: 0,

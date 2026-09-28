@@ -162,8 +162,8 @@ describe('Telegram filter rules', () => {
 
 		vi.spyOn(client, 'iterDialogs').mockReturnValue(
 			iterate([
-				dialogOf({ _: 'peerUser', userId: user.id }, [], [user]),
-				dialogOf({ _: 'peerChat', chatId: group.id }, [group]),
+				dialogOf({ _: 'peerUser', userId: user.id }, [], [user], 5),
+				dialogOf({ _: 'peerChat', chatId: group.id }, [group], [], 9),
 			]),
 		);
 
@@ -185,6 +185,7 @@ describe('Telegram filter rules', () => {
 		expect((await harness.socket.nextFrame()).d).toMatchObject({
 			users: serializeVector([]),
 			chats: serializeVector([group]),
+			topMessages: [{ peerId: `-${group.id}`, messageId: 9 }],
 		});
 		expect(call).not.toHaveBeenCalled();
 	});

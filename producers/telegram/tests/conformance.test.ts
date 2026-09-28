@@ -38,6 +38,7 @@ import {
 	vectors,
 } from './fixtures';
 import { createTelegramProducer } from '../src/producer';
+import { serializeVector } from '../src/tl';
 
 const CHANNEL_PEER_ID = '-1001987654321';
 
@@ -227,8 +228,23 @@ describe('identify', () => {
 
 		expect({ op, d }).toEqual({
 			op: vectors.identify.op,
-			d: { ...z.looseObject({}).parse(vectors.identify.d), streamId: outbox.streamId },
+			d: {
+				...z.looseObject({}).parse(vectors.identify.d),
+				streamId: outbox.streamId,
+				recovered: true,
+			},
 		});
+	});
+
+	it('reports recovered: false once mtcute skipped updates', async () => {
+		start();
+		producer.session.onUpdatesSkipped('Telegram answered updates.differenceTooLong');
+
+		const socket = await server.nextConnection();
+
+		socket.send(IngestOpcode.HELLO, helloFrame().d);
+
+		expect((await socket.nextFrame()).d).toMatchObject({ recovered: false });
 	});
 
 	it('writes each forwarded update to the outbox before its handler returns', () => {
@@ -318,6 +334,27 @@ describe('request vectors', () => {
 				return DEFAULT_FILTER;
 			}
 
+			case 'request/chats-fetch-top-messages': {
+				const [group] = decodeVector(field(first, 'chats'));
+
+				if (!group) {
+					throw new Error(`${id} names no chat`);
+				}
+
+				const chat = narrow(group, 'chat');
+				const [top] = z
+					.array(z.object({ messageId: z.number() }))
+					.parse(field(first, 'topMessages'));
+
+				vi.spyOn(client, 'iterDialogs').mockReturnValue(
+					iterate([
+						dialogOf({ _: 'peerChat', chatId: chat.id }, [chat], [], top?.messageId),
+					]),
+				);
+
+				return DEFAULT_FILTER;
+			}
+
 			case 'request/messages-fetch-ids':
 			case 'request/messages-fetch-range': {
 				const messages = decodeObject(field(first, 'messages'));
@@ -401,7 +438,17 @@ describe('request vectors', () => {
 		socket.send(z.enum(TelegramOpcode).parse(request.request.op), request.request.d, nonce);
 
 		for (const expected of request.reply) {
-			expect(await socket.nextFrame()).toEqual({ op: expected.op, d: expected.d, nonce });
+			// Every part carries users and topics, empty when it has none; a vector may leave them out.
+			const d =
+				expected.op === TelegramOpcode.CHATS_FETCH_RESULT
+					? {
+							users: serializeVector([]),
+							topics: [],
+							...z.looseObject({}).parse(expected.d),
+						}
+					: expected.d;
+
+			expect(await socket.nextFrame()).toEqual({ op: expected.op, d, nonce });
 		}
 
 		if (filter === DENY_CHANNEL) {
@@ -428,5 +475,33 @@ describe('request vectors', () => {
 			first?.op === TelegramOpcode.CHATS_FETCH_RESULT && field(first, 'part') !== 0;
 
 		expect(malformed || outOfOrder).toBe(true);
+	});
+});
+
+describe('snapshot', () => {
+	it("names each chat's newest message in the part that carries the chat", async () => {
+		const { forum, group, topics } = vectorChats();
+
+		vi.spyOn(client, 'iterDialogs').mockReturnValue(
+			iterate([
+				dialogOf({ _: 'peerChannel', channelId: forum.id }, [forum], [], 11),
+				dialogOf({ _: 'peerChat', chatId: group.id }, [group], [], 12),
+			]),
+		);
+		vi.spyOn(client, 'call').mockResolvedValue(topics);
+		start();
+
+		const socket = await greeted();
+
+		socket.send(TelegramOpcode.CHATS_FETCH, {}, 'snapshot');
+
+		const parts = [await socket.nextFrame(), await socket.nextFrame()].map(({ d }) =>
+			TelegramChatsPart.parse(d),
+		);
+
+		expect(parts.map(({ topMessages }) => topMessages)).toEqual([
+			[{ peerId: `-100${forum.id}`, messageId: 11 }],
+			[{ peerId: `-${group.id}`, messageId: 12 }],
+		]);
 	});
 });

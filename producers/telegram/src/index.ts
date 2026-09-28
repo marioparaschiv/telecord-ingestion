@@ -14,11 +14,13 @@ const client = createTelegramClient({
 	apiHash: env.TELEGRAM_API_HASH,
 	dataDir: env.DATA_DIR,
 	onChannelTooLong: (_channelId, difference) => updates.onChannelTooLong(difference),
+	onUnauthorized: (reason) => session.onUnauthorized(reason),
+	onUpdatesSkipped: (reason) => session.onUpdatesSkipped(reason),
 });
 
 const outbox = new Outbox(join(env.DATA_DIR, OUTBOX_FILE));
 
-const { connection, updates } = createTelegramProducer({
+const { connection, updates, session } = createTelegramProducer({
 	client,
 	filter: { rules: env.FILTER_RULES, fallback: env.FILTER_DEFAULT },
 	url: env.INGEST_URL,
@@ -54,4 +56,7 @@ process.once('SIGINT', () => void shutdown());
 process.once('SIGTERM', () => void shutdown());
 
 updates.start();
+
+// IDENTIFY reports whether the catch-up that logging in starts recovered every update.
+await session.caughtUp();
 connection.start();
