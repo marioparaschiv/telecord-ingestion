@@ -9,6 +9,7 @@ import {
 	IngestOpcode,
 	IngestProbeResultSchema,
 	IngestProbeSchema,
+	SessionState,
 	type IngestEnvelope,
 } from '@telecord/ingest-client';
 import { TelegramChatsPart, TelegramOpcode } from '@telecord/ingest-client/telegram';
@@ -477,6 +478,76 @@ describe('IngestConnection', () => {
 			op: 'CHATS_FETCH_RESULT',
 			d: { part: 0, done: true },
 			nonce: 'snapshot',
+		});
+	});
+
+	describe('session state', () => {
+		function sessionState(state: SessionState, reason?: string) {
+			return { op: 'SESSION_STATE', d: { state, ...(reason !== undefined && { reason }) } };
+		}
+
+		it('sends the reported state once READY answers IDENTIFY, outside the stream', async () => {
+			connect().reportSessionState({ state: SessionState.READY });
+
+			const socket = await server.nextConnection();
+
+			socket.hello();
+
+			expect(await socket.nextFrame()).toMatchObject({ op: 'IDENTIFY' });
+
+			await sync(socket);
+			socket.send(IngestOpcode.READY, { lastSeq: 0 });
+
+			expect(await socket.nextFrame()).toEqual(sessionState(SessionState.READY));
+			expect(outbox.size).toBe(0);
+		});
+
+		it('sends nothing until a state is reported', async () => {
+			connect();
+
+			await sync(await streaming());
+		});
+
+		it('sends each change once and drops a report of the state it holds', async () => {
+			const producer = connect();
+			const socket = await streaming();
+
+			await sync(socket);
+			producer.reportSessionState({ state: SessionState.READY });
+			producer.reportSessionState({ state: SessionState.RECONNECTING });
+			producer.reportSessionState({ state: SessionState.RECONNECTING, reason: 'again' });
+			producer.reportSessionState({
+				state: SessionState.INVALID_CREDENTIALS,
+				reason: 'AUTH_KEY_UNREGISTERED',
+			});
+			socket.send(IngestOpcode.READY, { lastSeq: 0 });
+
+			expect(await events(socket, 3)).toEqual([
+				sessionState(SessionState.READY),
+				sessionState(SessionState.RECONNECTING),
+				sessionState(SessionState.INVALID_CREDENTIALS, 'AUTH_KEY_UNREGISTERED'),
+			]);
+
+			await sync(socket);
+		});
+
+		it('sends the current state again after a reconnect', async () => {
+			const producer = connect();
+			const socket = await streaming();
+
+			producer.reportSessionState({ state: SessionState.RECONNECTING });
+
+			expect(await socket.nextFrame()).toEqual(sessionState(SessionState.RECONNECTING));
+
+			socket.terminate();
+			producer.reportSessionState({ state: SessionState.FAILED, reason: 'Gave up' });
+
+			const resumed = await reconnected();
+
+			resumed.hello();
+			await resumed.ready();
+
+			expect(await resumed.nextFrame()).toEqual(sessionState(SessionState.FAILED, 'Gave up'));
 		});
 	});
 });
