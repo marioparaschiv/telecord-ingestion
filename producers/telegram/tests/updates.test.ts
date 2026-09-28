@@ -287,7 +287,11 @@ describe('Telegram update forwarding', () => {
 			id: [
 				{
 					_: 'inputUserFromMessage',
-					peer: { _: 'inputPeerChannel', channelId: CHANNEL_ID, accessHash: expect.anything() },
+					peer: {
+						_: 'inputPeerChannel',
+						channelId: CHANNEL_ID,
+						accessHash: expect.anything(),
+					},
 					msgId: 42,
 					userId: DM_USER_ID,
 				},
