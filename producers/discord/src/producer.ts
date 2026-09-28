@@ -7,6 +7,7 @@ import {
 	DiscordOpcode,
 } from '@telecord/ingest-client/discord';
 import { IngestConnection, type Filter, type Outbox } from '@telecord/producer-core';
+import { SessionState } from '@telecord/ingest-client';
 
 import { createDispatchForwarder } from './dispatches';
 import { createDiscordRequests } from './requests';
@@ -16,6 +17,9 @@ import identify from './identify';
 
 // discord.js connects with `ws.version` but leaves it out of its typings, so it is read through a schema.
 const GatewayOptionsSchema = z.object({ version: z.number().int().positive() });
+
+/** The gateway close code for a token Discord no longer accepts. */
+const TOKEN_INVALID_CLOSE_CODE = 4004;
 
 type DiscordProducerOptions = {
 	client: Client;
@@ -39,6 +43,11 @@ type DiscordProducerOptions = {
  * resume. When the client was seeded with a stored session, `IDENTIFY` says
  * whether it resumed. A seeded client turns ready only once it has resumed or
  * identified anew, so a connection started from its `ready` event knows which.
+ *
+ * The gateway session's state is reported as it changes: `reconnecting` while
+ * the client reconnects, `ready` once it is ready or resumed, and on a close
+ * the client does not come back from, `invalid_credentials` for a refused
+ * token and `failed` for anything else.
  *
  * @param options - The client, filter rules, server, outbox and fatal-refusal handler.
  * @returns The connection, not yet started, and the handler for the client's `raw` event.
@@ -74,6 +83,28 @@ export function createDiscordProducer({
 		},
 		onFatal,
 	});
+
+	client.on('shardReady', () => connection.reportSessionState({ state: SessionState.READY }));
+	client.on('shardResume', () => connection.reportSessionState({ state: SessionState.READY }));
+	client.on('shardReconnecting', () =>
+		connection.reportSessionState({ state: SessionState.RECONNECTING }),
+	);
+	client.on('shardDisconnect', ({ code, reason }) =>
+		connection.reportSessionState({
+			state:
+				code === TOKEN_INVALID_CLOSE_CODE
+					? SessionState.INVALID_CREDENTIALS
+					: SessionState.FAILED,
+			reason: `${code} ${reason}`.trim(),
+		}),
+	);
+	// Emitted when a reconnect is refused with HTTP 401. With a listener, discord.js stops only the gateway connection.
+	client.on('invalidated', () =>
+		connection.reportSessionState({
+			state: SessionState.INVALID_CREDENTIALS,
+			reason: 'Discord refused the token while reconnecting',
+		}),
+	);
 
 	const dispatches = createDispatchForwarder({
 		client,

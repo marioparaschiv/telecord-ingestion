@@ -115,6 +115,8 @@ export type DiscordHarness = {
 	routes: Map<string, RestHandler>;
 	/** The `IDENTIFY` the producer answered `HELLO` with. */
 	identify: IngestEnvelope;
+	/** The `SESSION_STATE` the producer sent after `READY`. */
+	sessionState: IngestEnvelope;
 	/** The frames forwarded while the client logged in, already acknowledged. */
 	backlog: IngestEnvelope[];
 	close: () => Promise<void>;
@@ -205,6 +207,7 @@ export async function startDiscord(
 	socket.hello();
 
 	const identify = await socket.ready();
+	const sessionState = await socket.nextFrame();
 
 	socket.send(IngestOpcode.PING);
 
@@ -221,6 +224,7 @@ export async function startDiscord(
 		producer,
 		outbox,
 		identify,
+		sessionState,
 		rest,
 		routes,
 		backlog,
