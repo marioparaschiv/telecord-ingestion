@@ -5,7 +5,7 @@ import {
 	type TelegramClient,
 	type tl,
 } from '@mtcute/node';
-import { toInputChannel } from '@mtcute/node/utils.js';
+import { toInputChannel, toInputUser } from '@mtcute/node/utils.js';
 
 import type { PeerType, TelegramFilterSubject } from './filter';
 
@@ -160,6 +160,36 @@ export async function fetchFullChat(
 	const { chats } = await client.call({ _: 'channels.getChannels', id: [toInputChannel(input)] });
 
 	return chats.find((chat) => chat.id === id);
+}
+
+/**
+ * The session's complete, non-min copy of a user, fetched from Telegram when
+ * the cache holds none or only a min copy.
+ *
+ * @param client - The session.
+ * @param userId - The user's id.
+ * @returns The user, or undefined when the session cannot address them.
+ */
+export async function fetchFullUser(
+	client: TelegramClient,
+	userId: number,
+): Promise<tl.TypeUser | undefined> {
+	const cached = await client.storage.peers.getCompleteById(userId);
+
+	if (cached?._ === 'user' && isComplete(cached)) {
+		return cached;
+	}
+
+	// Resolves through a message the user was seen in when only a min copy is known.
+	const input = await client.storage.peers.getById(userId);
+
+	if (!input) {
+		return undefined;
+	}
+
+	const users = await client.call({ _: 'users.getUsers', id: [toInputUser(input)] });
+
+	return users.find((user) => user.id === userId);
 }
 
 /**

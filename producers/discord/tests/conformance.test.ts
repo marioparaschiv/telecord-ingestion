@@ -124,7 +124,7 @@ describe('event vectors', () => {
 	it.each(events.map((event) => [event.id, event] as const))(
 		'%s: forwards what the gateway sends when it is forwardable, and nothing else',
 		async (_id, { send }) => {
-			await start();
+			await start(ALLOW_ALL);
 			harness.gateway.dispatch(send.op, payloadOf(send));
 			// The gateway delivers in order, so the sentinel's frame marks the end of whatever `send` produced.
 			harness.gateway.dispatch('MESSAGE_DELETE', SENTINEL);
@@ -218,7 +218,10 @@ describe('request vectors', () => {
 
 	it.each(
 		requests
-			.filter(({ outcome, id }) => outcome === 'accepted' && id !== 'request/chats-fetch')
+			.filter(
+				({ outcome, request }) =>
+					outcome === 'accepted' && request.op !== DiscordOpcode.CHATS_FETCH,
+			)
 			.map((request) => [request.id, request] as const),
 	)('%s: answers with exactly the vector reply', async (id, request) => {
 		await start(filterFor(id));
@@ -260,6 +263,32 @@ describe('request vectors', () => {
 		expect(named).toEqual(snapshot?.chats);
 		expect(harness.rest.mock.calls.length).toBe(calls);
 		expect(cdn).not.toHaveBeenCalled();
+	});
+
+	it('request/chats-fetch-without-self-member: ships a guild whose own member is not cached without one', async () => {
+		await start();
+
+		const snapshot = requests.find(
+			({ id }) => id === 'request/chats-fetch-without-self-member',
+		);
+		const [expected] = (snapshot?.reply ?? []).flatMap(
+			(part) => DiscordChatsPart.parse(part.d).guilds,
+		);
+
+		if (!expected) {
+			throw new Error('request/chats-fetch-without-self-member carries no guild');
+		}
+
+		harness.gateway.dispatch('GUILD_CREATE', expected);
+		await harness.socket.nextFrame();
+
+		const parts = (await ask(DiscordOpcode.CHATS_FETCH, {}, 'snapshot')).map((part) =>
+			DiscordChatsPart.parse(part.d),
+		);
+
+		expect(parts.flatMap(({ guilds }) => guilds).find(({ id }) => id === expected.id)).toEqual(
+			expected,
+		);
 	});
 
 	it("request/chats-fetch: names each channel's newest message as it arrived", async () => {
