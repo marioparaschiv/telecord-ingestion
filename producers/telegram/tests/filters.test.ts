@@ -27,10 +27,11 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 });
 
-/** The vectors' channel message, re-addressed to another chat. */
+/** The vectors' channel message, re-addressed to another chat and shipped with that chat's copies. */
 function messageIn(
 	peerId: tl.TypePeer,
 	kind: 'updateNewMessage' | 'updateNewChannelMessage' | 'updateEditChannelMessage',
+	chats: tl.TypeChat[] = [],
 ) {
 	const container = vectorUpdates();
 	const [update] = container.updates;
@@ -41,7 +42,10 @@ function messageIn(
 
 	const message: tl.RawMessage = { ...update.message, peerId };
 
-	return new RawUpdateInfo({ ...update, _: kind, message }, PeersIndex.from(container));
+	return new RawUpdateInfo(
+		{ ...update, _: kind, message },
+		PeersIndex.from({ ...container, chats: [...container.chats, ...chats] }),
+	);
 }
 
 /** The chat the next forwarded `UPDATE` frame concerns. */
@@ -101,7 +105,7 @@ describe('Telegram filter rules', () => {
 			messageIn({ _: 'peerChannel', channelId: CHANNEL_ID }, 'updateNewChannelMessage'),
 		);
 		producer.updates.onRawUpdate(
-			messageIn({ _: 'peerChat', chatId: group.id }, 'updateNewMessage'),
+			messageIn({ _: 'peerChat', chatId: group.id }, 'updateNewMessage', [group]),
 		);
 
 		expect(await nextUpdatePeer()).toEqual({ _: 'peerChat', chatId: group.id });
@@ -167,7 +171,7 @@ describe('Telegram filter rules', () => {
 			messageIn({ _: 'peerUser', userId: USER_ID }, 'updateNewMessage'),
 		);
 		producer.updates.onRawUpdate(
-			messageIn({ _: 'peerChat', chatId: group.id }, 'updateNewMessage'),
+			messageIn({ _: 'peerChat', chatId: group.id }, 'updateNewMessage', [group]),
 		);
 
 		expect(await nextUpdatePeer()).toEqual({ _: 'peerChat', chatId: group.id });

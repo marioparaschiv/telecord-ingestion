@@ -1,6 +1,7 @@
 import {
 	PeersIndex,
 	getMarkedPeerId,
+	parseMarkedPeerId,
 	type RawUpdateInfo,
 	type TelegramClient,
 	type tl,
@@ -20,15 +21,30 @@ import {
 	type OutboxCapture,
 } from '@telecord/producer-core';
 
-import { fetchFullChat, replaceMinPeers, subjectOfMarkedId } from './peers';
+import {
+	fetchFullChat,
+	fetchFullUser,
+	isChat,
+	isComplete,
+	replaceMinPeers,
+	subjectOfMarkedId,
+} from './peers';
 import { deserialize, serialize } from './tl';
 
 type ForwardedUpdate = Extract<tl.TypeUpdate, { _: TelegramForwardedUpdate }>;
 
 const FORWARDED_UPDATES = new Set<string>(TELEGRAM_FORWARDED_UPDATES);
 
-/** Updates the server must receive with the full, non-min chat they concern. */
+/**
+ * Updates the server must receive with the full, non-min chat they concern,
+ * which for a private chat is the user. A message or edit can be the first the
+ * server hears of a chat, and the full chat is what lets it store that chat.
+ */
 const FULL_CHAT_UPDATES = new Set<string>([
+	'updateNewMessage',
+	'updateNewChannelMessage',
+	'updateEditMessage',
+	'updateEditChannelMessage',
 	'updateChannel',
 	'updateChat',
 	'updateChatDefaultBannedRights',
@@ -109,7 +125,8 @@ type UpdateForwarderOptions = {
  * Turns the session's raw updates into `UPDATE` frames. mtcute has already
  * expanded short updates and recovered gaps; each forwarded update is boxed
  * in its own `updates` container with its peers, min peers replaced by the
- * session's complete copies and, for chat state and reactions, the full chat.
+ * session's complete copies and, for messages, chat state and reactions, the
+ * full chat, or for a private chat the full user.
  *
  * mtcute emits an update synchronously and saves its update state at the end
  * of the tick, so each update is captured in the outbox before its handler
@@ -147,11 +164,23 @@ export function createUpdateForwarder({ client, filter, outbox, send }: UpdateFo
 		chatId: number,
 		peers: PeersIndex,
 	): Promise<void> {
-		try {
-			const chat = await fetchFullChat(client, chatId);
+		const [kind, id] = parseMarkedPeerId(chatId);
+		const shipped = kind === 'user' ? peers.users.get(id) : peers.chats.get(id);
 
-			if (chat) {
-				peers.chats.set(chat.id, chat);
+		if (shipped && isComplete(shipped)) {
+			return;
+		}
+
+		try {
+			const full =
+				kind === 'user' ? await fetchFullUser(client, id) : await fetchFullChat(client, chatId);
+
+			if (full) {
+				if (isChat(full)) {
+					peers.chats.set(full.id, full);
+				} else {
+					peers.users.set(full.id, full);
+				}
 
 				return;
 			}
@@ -179,7 +208,7 @@ export function createUpdateForwarder({ client, filter, outbox, send }: UpdateFo
 
 		await replaceMinPeers(client, peers);
 
-		if (chatId !== undefined && chatId < 0 && FULL_CHAT_UPDATES.has(update._)) {
+		if (chatId !== undefined && FULL_CHAT_UPDATES.has(update._)) {
 			await attachFullChat(update, chatId, peers);
 		}
 
