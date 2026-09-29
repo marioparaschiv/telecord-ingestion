@@ -25,7 +25,7 @@ A producer logs in as your account and sends the chats you choose to a Telecord 
 
 - **You choose what is shared.** Filter rules pick the chats. DMs are off by default.
 - **Shared chats include their history.** The server can read past messages, not only new ones.
-- **The server can only ask for a few things.** Every request is checked against your filters.
+- **The server can only ask for a few things.** Every request about a chat is checked against your filters.
 - **Images are signed and locked down.** Non-root, read-only, built only from release tags.
 - **Updates install themselves**, but only after the signature checks out.
 
@@ -234,6 +234,7 @@ TDLib never exposes the raw payloads the protocol forwards.
 For each shared chat, the server receives:
 
 - new, edited and deleted messages;
+- on Telegram, the full chat with each new or edited message, or the full user for a DM;
 - reactions;
 - chat, channel, server and role changes, and changes to your own membership.
 
@@ -241,7 +242,7 @@ Nothing else your account receives is sent. A denied chat is left out entirely.
 
 ### What the server can ask for
 
-These are the only requests. Each is checked against your filters first; a request for a denied chat is declined without calling Telegram or Discord.
+These are the only requests. Each one about a chat is checked against your filters first; a request for a denied chat is declined without calling Telegram or Discord.
 
 | Request              | Telegram | Discord | What it does                                                   |
 | -------------------- | -------- | ------- | -------------------------------------------------------------- |
@@ -249,6 +250,7 @@ These are the only requests. Each is checked against your filters first; a reque
 | `MESSAGES_FETCH`     | yes      | yes     | Reads up to 100 messages from one chat.                        |
 | `MEDIA_FETCH`        | yes      | yes     | Downloads one file and uploads it to the server.               |
 | `ATTACHMENT_REFRESH` | no       | yes     | Renews one expired Discord attachment link.                    |
+| `USERS_FETCH`        | yes      | no      | Reads the profile of one user your account already knows.      |
 | `PROBE`              | yes      | yes     | Checks the producer is connected and responding.               |
 
 `MEDIA_FETCH` is limited: Telegram accepts only documents, photos and chat photos, and Discord downloads only from Discord's CDN.
@@ -335,7 +337,7 @@ docker buildx imagetools inspect ghcr.io/marioparaschiv/telecord-ingestion-teleg
 | Producer | Library                                                                                                                   | Speaks                |
 | -------- | ------------------------------------------------------------------------------------------------------------------------- | --------------------- |
 | Telegram | [mtcute](https://github.com/mtcute/mtcute) 0.32.3                                                                         | TL layer 229          |
-| Discord  | `discord.js-selfbot-v13` via [FORK.Discord.Self](https://github.com/marioparaschiv/FORK.Discord.Self) at commit `3e6baf2` | Gateway API version 9 |
+| Discord  | `discord.js-selfbot-v13` via [FORK.Discord.Self](https://github.com/marioparaschiv/FORK.Discord.Self) at commit `0ff78cd` | Gateway API version 9 |
 
 TDLib and the official apps are not supported, because they never expose raw TL payloads. Other MTProto libraries that do (GramJS, Telethon, Pyrogram, gotd) could implement the protocol, but only mtcute ships here.
 
