@@ -14,7 +14,7 @@
 	"dependencies": {
 		"@telecord/ingest-client": "catalog:",
 		"@telecord/producer-core": "workspace:*",
-		"discord.js-selfbot-v13": "github:marioparaschiv/FORK.Discord.Self#0ff78cda868b061e536fbbc5d7d8bd47f0eb39f2",
+		"discord.js-selfbot-v13": "github:marioparaschiv/FORK.Discord.Self#main",
 		"zod": "catalog:"
 	},
 	"devDependencies": {

@@ -207,7 +207,7 @@ importers:
         specifier: workspace:*
         version: link:../../packages/producer-core
       discord.js-selfbot-v13:
-        specifier: github:marioparaschiv/FORK.Discord.Self#0ff78cda868b061e536fbbc5d7d8bd47f0eb39f2
+        specifier: github:marioparaschiv/FORK.Discord.Self#main
         version: https://codeload.github.com/marioparaschiv/FORK.Discord.Self/tar.gz/0ff78cda868b061e536fbbc5d7d8bd47f0eb39f2(supports-color@7.2.0)
       zod:
         specifier: 'catalog:'
