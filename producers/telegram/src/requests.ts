@@ -51,6 +51,12 @@ const FILE_REFERENCE_ERRORS = new Set<string>(['FILE_REFERENCE_EXPIRED', 'FILE_R
 /** The server waits 10 minutes for `MESSAGES_FETCH`, so flood waits up to 9 are slept through. */
 const MESSAGES_FETCH_FLOOD_SLEEP = 9 * 60_000;
 
+/**
+ * mtcute retries a failing `upload.getFile` forever, so a file Telegram keeps answering with
+ * `-503 Timeout` would download for good. The server gives up on `MEDIA_FETCH` after 2 minutes.
+ */
+const DOWNLOAD_STALL_TIMEOUT = 60_000;
+
 type DownloadTarget = { location: FileLocation; dcId: number };
 
 type MessageSource = Extract<TelegramMediaFetchPayload['source'], { kind: 'message' }>;
@@ -178,7 +184,10 @@ async function fetchUsers(
 	}
 }
 
-/** The chat whose photo a peer photo location reads, when it names one. */
+/**
+ * The chat whose photo a peer photo location reads, when it names one. A
+ * user's photo names no chat, so no filter applies, as with `USERS_FETCH`.
+ */
 function photoChatId(location: FileLocation): number | undefined {
 	if (location._ !== 'inputPeerPhotoFileLocation') {
 		return undefined;
@@ -186,9 +195,7 @@ function photoChatId(location: FileLocation): number | undefined {
 
 	const { peer } = location;
 
-	return peer._ === 'inputPeerSelf' || peer._ === 'inputPeerEmpty'
-		? undefined
-		: getMarkedPeerId(peer);
+	return isInputPeerUser(peer) || peer._ === 'inputPeerEmpty' ? undefined : getMarkedPeerId(peer);
 }
 
 async function locate(
@@ -314,7 +321,10 @@ function download(
 	{ location, dcId }: DownloadTarget,
 	maxBytes: number,
 ): Promise<Uint8Array<ArrayBuffer> | undefined> {
-	return readLimited(client.downloadAsIterable(location, { dcId }), maxBytes);
+	return readLimited(
+		client.downloadAsIterable(location, { dcId, stallTimeout: DOWNLOAD_STALL_TIMEOUT }),
+		maxBytes,
+	);
 }
 
 /**

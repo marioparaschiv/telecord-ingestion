@@ -33,13 +33,16 @@ function documentLocation(fileReference: Uint8Array): tl.RawInputDocumentFileLoc
 	};
 }
 
-async function mediaFetch(source: object): Promise<unknown> {
+async function mediaFetch(
+	source: object,
+	location: tl.TypeInputFileLocation = documentLocation(EXPIRED_REFERENCE),
+): Promise<unknown> {
 	harness.socket.send(
 		TelegramOpcode.MEDIA_FETCH,
 		{
 			locator: {
 				kind: 'tl',
-				location: serialize(documentLocation(EXPIRED_REFERENCE)),
+				location: serialize(location),
 				dcId: 4,
 			},
 			source,
@@ -111,13 +114,33 @@ describe('MEDIA_FETCH', () => {
 			}),
 			expect.anything(),
 		);
-		expect(download).toHaveBeenLastCalledWith(documentLocation(FRESH_REFERENCE), { dcId: 4 });
+		expect(download).toHaveBeenLastCalledWith(documentLocation(FRESH_REFERENCE), {
+			dcId: 4,
+			stallTimeout: 60_000,
+		});
 	});
 
 	it('answers expired for an avatar, which has no message to refresh through', async () => {
 		vi.spyOn(harness.client, 'downloadAsIterable').mockImplementation(expired);
 
 		expect(await mediaFetch({ kind: 'avatar' })).toEqual({ ok: false, reason: 'expired' });
+	});
+
+	it("uploads a user's photo, which the default DM rule does not filter", async () => {
+		vi.spyOn(harness.client, 'downloadAsIterable').mockImplementation(() => bytesOf(700));
+
+		expect(
+			await mediaFetch(
+				{ kind: 'avatar' },
+				{
+					_: 'inputPeerPhotoFileLocation',
+					big: false,
+					peer: { _: 'inputPeerUser', userId: 777000, accessHash: Long.fromNumber(5) },
+					photoId: Long.fromNumber(1),
+				},
+			),
+		).toEqual({ ok: true, bytes: 700 });
+		expect(fetch).toHaveBeenCalledOnce();
 	});
 
 	it('refuses a file larger than maxBytes without uploading it', async () => {
