@@ -42,6 +42,12 @@ function createTelegramClient({
 		storage: new SqliteStorage(join(dataDir, SESSION_FILE)),
 		updates: { catchUp: true, onChannelTooLong },
 		network: { middlewares: [watchCalls(signals), ...networkMiddlewares.basic()] },
+		initConnectionOptions: {
+			deviceModel:
+				`Telecord Integration ${process.env.NODE_ENV === 'development' ? '(Development)' : ''}`.trim(),
+			appVersion: '1.0.0',
+			systemVersion: '1.0.0',
+		},
 	});
 }
 
