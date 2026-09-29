@@ -1,0 +1,43 @@
+{
+	"name": "@telecord/producer-otel",
+	"version": "0.1.0",
+	"private": true,
+	"files": [
+		"dist"
+	],
+	"type": "module",
+	"exports": {
+		".": {
+			"types": "./src/index.ts",
+			"development": "./src/index.ts",
+			"import": "./dist/index.mjs"
+		},
+		"./register": {
+			"types": "./src/register.ts",
+			"development": "./src/register.ts",
+			"import": "./dist/register.mjs"
+		}
+	},
+	"scripts": {
+		"build": "tsdown",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@opentelemetry/api": "^1.9.1",
+		"@opentelemetry/exporter-metrics-otlp-http": "^0.218.0",
+		"@opentelemetry/exporter-trace-otlp-http": "^0.218.0",
+		"@opentelemetry/instrumentation": "^0.218.0",
+		"@opentelemetry/instrumentation-undici": "^0.28.0",
+		"@opentelemetry/resources": "^2.7.1",
+		"@opentelemetry/sdk-metrics": "^2.7.1",
+		"@opentelemetry/sdk-trace-node": "^2.7.1",
+		"@opentelemetry/semantic-conventions": "^1.41.1",
+		"@telecord/producer-core": "workspace:*",
+		"zod": "catalog:"
+	},
+	"devDependencies": {
+		"@total-typescript/ts-reset": "catalog:",
+		"@types/node": "catalog:",
+		"typescript": "catalog:"
+	}
+}

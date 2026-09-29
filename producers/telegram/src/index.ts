@@ -1,6 +1,9 @@
+import '@telecord/producer-otel/register';
+
 import { join } from 'node:path';
 
 import { OUTBOX_FILE, Outbox, createTaggedLogger, parseEnv } from '@telecord/producer-core';
+import { shutdown as shutdownTelemetry } from '@telecord/producer-otel';
 
 import { createTelegramProducer } from './producer';
 import createTelegramClient from './client';
@@ -37,6 +40,7 @@ async function shutdown(code = 0): Promise<void> {
 	connection.stop();
 	await client.destroy();
 	outbox.close();
+	await shutdownTelemetry();
 	process.exit(code);
 }
 

@@ -20,6 +20,7 @@ import {
 	type Outbox,
 	type OutboxCapture,
 } from '@telecord/producer-core';
+import { withSpan } from '@telecord/producer-otel';
 
 import {
 	fetchFullChat,
@@ -202,19 +203,29 @@ export function createUpdateForwarder({ client, filter, outbox, send }: UpdateFo
 		peers: PeersIndex,
 	): Promise<TelegramUpdatePayload | undefined> {
 		const chatId = chatIdOf(update);
-		const chat = chatId === undefined ? {} : await subjectOfMarkedId(client, chatId, peers);
+		const attributes = {
+			'telecord.platform': 'telegram',
+			'telecord.account.id': client.storage.self.getCached(true)?.userId,
+			'telegram.update': update._,
+			'telegram.chat.id': chatId,
+			'telegram.message.id': 'message' in update ? update.message.id : undefined,
+		};
 
-		if (!isAllowed(filter, { ...chat, update: update._ })) {
-			return undefined;
-		}
+		return withSpan('telegram.update', attributes, async () => {
+			const chat = chatId === undefined ? {} : await subjectOfMarkedId(client, chatId, peers);
 
-		await replaceMinPeers(client, peers);
+			if (!isAllowed(filter, { ...chat, update: update._ })) {
+				return undefined;
+			}
 
-		if (chatId !== undefined && FULL_CHAT_UPDATES.has(update._)) {
-			await attachFullChat(update, chatId, peers);
-		}
+			await replaceMinPeers(client, peers);
 
-		return { data: boxUpdate(update, peers) };
+			if (chatId !== undefined && FULL_CHAT_UPDATES.has(update._)) {
+				await attachFullChat(update, chatId, peers);
+			}
+
+			return { data: boxUpdate(update, peers) };
+		});
 	}
 
 	/** A channel gap too long to replay: its difference is forwarded whole, with its recent messages. */

@@ -1,8 +1,11 @@
+import '@telecord/producer-otel/register';
+
 import { Client } from 'discord.js-selfbot-v13';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { OUTBOX_FILE, Outbox, createTaggedLogger, parseEnv } from '@telecord/producer-core';
+import { shutdown as shutdownTelemetry } from '@telecord/producer-otel';
 
 import { createDiscordProducer } from './producer';
 import { DiscordEnvSchema } from './env';
@@ -25,14 +28,15 @@ const producer = createDiscordProducer({
 	window: env.INGEST_WINDOW,
 	onFatal: (reason) => {
 		logger.error(`The ingest server refused this producer (${reason}), shutting down`);
-		shutdown(1);
+		void shutdown(1);
 	},
 });
 
-function shutdown(code = 0): void {
+async function shutdown(code = 0): Promise<void> {
 	producer.connection.stop();
 	client.destroy({ resumable: true });
 	outbox.close();
+	await shutdownTelemetry();
 	process.exit(code);
 }
 
@@ -46,7 +50,7 @@ client.once('ready', (ready) => {
 	producer.connection.start();
 });
 
-process.once('SIGINT', () => shutdown());
-process.once('SIGTERM', () => shutdown());
+process.once('SIGINT', () => void shutdown());
+process.once('SIGTERM', () => void shutdown());
 
 await client.login(env.DISCORD_TOKEN);

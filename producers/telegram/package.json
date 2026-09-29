@@ -15,6 +15,7 @@
 		"@mtcute/node": "catalog:",
 		"@telecord/ingest-client": "catalog:",
 		"@telecord/producer-core": "workspace:*",
+		"@telecord/producer-otel": "workspace:*",
 		"zod": "catalog:"
 	},
 	"devDependencies": {

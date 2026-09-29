@@ -6,6 +6,7 @@ import {
 	type DiscordForwardedDispatch,
 } from '@telecord/ingest-client/discord';
 import { isAllowed, type Filter } from '@telecord/producer-core';
+import { withSpan } from '@telecord/producer-otel';
 
 import type { DiscordFilterSubject } from './filter';
 
@@ -87,16 +88,26 @@ export function createDispatchForwarder({ client, filter, send }: DispatchForwar
 
 			const { t: event, d: payload } = dispatch.data;
 			const routing = RoutingSchema.parse(payload);
+			const attributes = {
+				'telecord.platform': 'discord',
+				'telecord.account.id': client.user?.id,
+				'discord.event': event,
+				'discord.id': routing.id,
+				'discord.guild.id': routing.guild_id,
+				'discord.channel.id': routing.channel_id,
+			};
 
-			if (event === 'GUILD_MEMBER_UPDATE' && routing.user?.id !== client.user?.id) {
-				return;
-			}
+			withSpan('discord.dispatch', attributes, () => {
+				if (event === 'GUILD_MEMBER_UPDATE' && routing.user?.id !== client.user?.id) {
+					return;
+				}
 
-			if (!isAllowed(filter, { ...subjectOf(client, event, routing), event })) {
-				return;
-			}
+				if (!isAllowed(filter, { ...subjectOf(client, event, routing), event })) {
+					return;
+				}
 
-			send(event, payload);
+				send(event, payload);
+			});
 		},
 	};
 }
