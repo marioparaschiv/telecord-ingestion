@@ -13,7 +13,7 @@ catalog:
   '@mtcute/node': 0.32.3
   '@opentelemetry/api': ^1.9.1
   '@opentelemetry/sdk-metrics': ^2.7.1
-  '@telecord/ingest-client': ^0.5.0
+  '@telecord/ingest-client': ^0.7.0
   '@total-typescript/ts-reset': ^0.6.1
   '@types/node': ^24.0.0
   '@types/ws': ^8.18.1
@@ -24,4 +24,4 @@ catalog:
   zod: ^4.6.5
 
 minimumReleaseAgeExclude:
-  - '@telecord/ingest-client@0.5.0'
+  - '@telecord/ingest-client@0.7.0'
