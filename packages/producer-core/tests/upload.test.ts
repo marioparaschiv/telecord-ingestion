@@ -56,7 +56,7 @@ describe('postPresigned', () => {
 	it('posts the policy fields before the file', async () => {
 		const status = await postPresigned(
 			{ url, fields: { key: 'objects/1.jpg', policy: 'cG9saWN5' } },
-			new TextEncoder().encode('file-bytes'),
+			new Blob(['file-bytes']),
 		);
 
 		const { type, body } = await received;

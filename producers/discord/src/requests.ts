@@ -249,7 +249,7 @@ async function fetchMedia(
 			return { fileName, ok: false, message: `The file is larger than ${maxBytes} bytes` };
 		}
 
-		const status = await postPresigned(upload, bytes);
+		const status = await postPresigned(upload, new Blob([bytes]));
 
 		return status >= 200 && status < 300
 			? { fileName, ok: true, bytes: bytes.byteLength }

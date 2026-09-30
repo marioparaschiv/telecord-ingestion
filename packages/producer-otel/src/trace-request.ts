@@ -63,7 +63,8 @@ function traceRequest(
 ): RequestHandler {
 	return {
 		result: handler.result,
-		answer: (payload) => traceAnswer(name, attributes, handler.answer(payload)),
+		answer: (payload, progress) =>
+			traceAnswer(name, attributes, handler.answer(payload, progress)),
 	};
 }
 

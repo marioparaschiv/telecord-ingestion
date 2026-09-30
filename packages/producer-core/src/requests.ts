@@ -10,12 +10,18 @@ import {
 /** The server discards a snapshot answered in more parts than this. */
 const CHATS_FETCH_MAX_PARTS = 10_000;
 
+/**
+ * Tells the server a request is still being worked on, `bytes` of its file received so far, which
+ * keeps it waiting for the answer.
+ */
+export type ProgressReporter = (bytes: number) => void;
+
 /** How the producer answers one request opcode. */
 export type RequestHandler = {
 	/** The opcode every answer frame is sent under. */
 	result: IngestFrameOpcode;
-	/** Yields the payload of each answer frame, in order. */
-	answer: (payload: unknown) => AsyncIterable<object>;
+	/** Yields the payload of each answer frame, in order, reporting progress while it works. */
+	answer: (payload: unknown, progress: ProgressReporter) => AsyncIterable<object>;
 };
 
 type RequestSpec<PayloadSchema extends z.ZodType, ResultSchema extends z.ZodType<object>> = {
@@ -23,7 +29,10 @@ type RequestSpec<PayloadSchema extends z.ZodType, ResultSchema extends z.ZodType
 	result: IngestFrameOpcode;
 	resultSchema: ResultSchema;
 	/** Must answer every well-formed request, declining with a result rather than throwing. */
-	handle: (payload: z.output<PayloadSchema>) => Promise<z.output<ResultSchema>>;
+	handle: (
+		payload: z.output<PayloadSchema>,
+		progress: ProgressReporter,
+	) => Promise<z.output<ResultSchema>>;
 };
 
 /**
@@ -40,8 +49,8 @@ export function defineRequest<
 >(spec: RequestSpec<PayloadSchema, ResultSchema>): RequestHandler {
 	return {
 		result: spec.result,
-		async *answer(payload) {
-			const result = await spec.handle(spec.payload.parse(payload));
+		async *answer(payload, progress) {
+			const result = await spec.handle(spec.payload.parse(payload), progress);
 
 			spec.resultSchema.parse(result);
 

@@ -30,7 +30,7 @@ function snapshot(parts: object[], failure?: Error): RequestHandler {
 async function drain(handler: RequestHandler): Promise<object[]> {
 	const answered: object[] = [];
 
-	for await (const part of handler.answer({})) {
+	for await (const part of handler.answer({}, () => {})) {
 		answered.push(part);
 	}
 
@@ -86,7 +86,7 @@ describe('traceRequest', () => {
 			snapshot([{ part: 0 }, { part: 1 }]),
 		);
 
-		for await (const part of handler.answer({})) {
+		for await (const part of handler.answer({}, () => {})) {
 			expect(part).toEqual({ part: 0 });
 
 			break;
