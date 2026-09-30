@@ -14,6 +14,7 @@ import {
 	type TelegramChatsPartPayload,
 } from '@telecord/ingest-client/telegram';
 import { CHATS_PART_MAX_CHATS } from '@telecord/ingest-client';
+import { traceRequest } from '@telecord/producer-otel';
 
 import { fetchFullChat, isComplete, markedIdOf, subjectOfRaw } from './peers';
 import { serialize, serializeVector } from './tl';
@@ -240,9 +241,13 @@ async function* snapshotParts(
  * @returns The handler.
  */
 export function createTelegramSnapshot(client: TelegramClient, filter: Filter): RequestHandler {
-	return defineSnapshot({
-		result: TelegramOpcode.CHATS_FETCH_RESULT,
-		partSchema: TelegramChatsPart,
-		parts: () => snapshotParts(client, filter),
-	});
+	return traceRequest(
+		'telegram.chats_fetch',
+		{ 'telecord.platform': 'telegram', 'telecord.request': 'CHATS_FETCH' },
+		defineSnapshot({
+			result: TelegramOpcode.CHATS_FETCH_RESULT,
+			partSchema: TelegramChatsPart,
+			parts: () => snapshotParts(client, filter),
+		}),
+	);
 }

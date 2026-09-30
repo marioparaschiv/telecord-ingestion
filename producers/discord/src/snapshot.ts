@@ -17,6 +17,7 @@ import {
 } from '@telecord/producer-core';
 import { DiscordChatsPart, DiscordOpcode } from '@telecord/ingest-client/discord';
 import { CHATS_PART_MAX_CHATS } from '@telecord/ingest-client';
+import { traceRequest } from '@telecord/producer-otel';
 
 import { subjectOfChannel } from './channels';
 
@@ -178,9 +179,13 @@ async function* snapshotParts(
  * @returns The handler.
  */
 export function createDiscordSnapshot(client: Client, filter: Filter): RequestHandler {
-	return defineSnapshot({
-		result: DiscordOpcode.CHATS_FETCH_RESULT,
-		partSchema: DiscordChatsPart,
-		parts: () => snapshotParts(client, filter),
-	});
+	return traceRequest(
+		'discord.chats_fetch',
+		{ 'telecord.platform': 'discord', 'telecord.request': 'CHATS_FETCH' },
+		defineSnapshot({
+			result: DiscordOpcode.CHATS_FETCH_RESULT,
+			partSchema: DiscordChatsPart,
+			parts: () => snapshotParts(client, filter),
+		}),
+	);
 }

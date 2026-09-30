@@ -232,22 +232,34 @@ export function createUpdateForwarder({ client, filter, outbox, send }: UpdateFo
 	async function forwardChannelTooLong(
 		difference: tl.updates.RawChannelDifferenceTooLong,
 	): Promise<TelegramUpdatePayload | undefined> {
-		const peers = PeersIndex.from(difference);
-		const subject = await subjectOfMarkedId(client, channelOf(difference), peers);
-
-		if (!isAllowed(filter, subject)) {
-			return undefined;
-		}
-
-		await replaceMinPeers(client, peers);
-
-		return {
-			data: serialize({
-				...difference,
-				users: [...peers.users.values()],
-				chats: [...peers.chats.values()],
-			}),
+		const attributes = {
+			'telecord.platform': 'telegram',
+			'telecord.account.id': client.storage.self.getCached(true)?.userId,
+			'telegram.message.count': difference.messages.length,
 		};
+
+		return withSpan('telegram.channel_too_long', attributes, async (span) => {
+			const channelId = channelOf(difference);
+
+			span.setAttribute('telegram.chat.id', channelId);
+
+			const peers = PeersIndex.from(difference);
+			const subject = await subjectOfMarkedId(client, channelId, peers);
+
+			if (!isAllowed(filter, subject)) {
+				return undefined;
+			}
+
+			await replaceMinPeers(client, peers);
+
+			return {
+				data: serialize({
+					...difference,
+					users: [...peers.users.values()],
+					chats: [...peers.chats.values()],
+				}),
+			};
+		});
 	}
 
 	function enqueueUpdate(update: ForwardedUpdate, peers: PeersIndex, capture: number): void {
