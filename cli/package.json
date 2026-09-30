@@ -1,0 +1,33 @@
+{
+	"name": "@telecord/ingestion-cli",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"compile": "bun scripts/compile.ts",
+		"readme": "bun --conditions=development scripts/readme.ts",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@inquirer/prompts": "catalog:",
+		"@telecord/discord-producer": "workspace:*",
+		"@telecord/producer-core": "workspace:*",
+		"@telecord/telegram-producer": "workspace:*",
+		"commander": "catalog:",
+		"ink": "catalog:",
+		"ink-text-input": "catalog:",
+		"react": "catalog:",
+		"semver": "catalog:",
+		"smol-toml": "catalog:",
+		"zod": "catalog:"
+	},
+	"devDependencies": {
+		"@total-typescript/ts-reset": "catalog:",
+		"@types/bun": "catalog:",
+		"@types/node": "catalog:",
+		"@types/react": "catalog:",
+		"@types/semver": "catalog:",
+		"ink-testing-library": "catalog:",
+		"typescript": "catalog:"
+	}
+}

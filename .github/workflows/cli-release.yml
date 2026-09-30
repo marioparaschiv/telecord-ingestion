@@ -1,0 +1,109 @@
+name: CLI release
+
+on:
+    push:
+        tags:
+            - 'cli-v*'
+
+permissions:
+    contents: write
+    id-token: write
+
+jobs:
+    release:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+
+            - name: Resolve the version from the tag
+              id: target
+              env:
+                  TAG: ${{ github.ref_name }}
+              run: |
+                  version="${TAG#cli-v}"
+
+                  if ! echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+                    echo "::error::$TAG does not end in a semantic version"
+                    exit 1
+                  fi
+
+                  package_version="$(jq -r .version cli/package.json)"
+
+                  if [ "$version" != "$package_version" ]; then
+                    echo "::error::$TAG does not match cli/package.json version $package_version"
+                    exit 1
+                  fi
+
+                  case "$version" in
+                    *-*) prerelease=true ;;
+                    *) prerelease=false ;;
+                  esac
+
+                  echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+
+            - uses: pnpm/action-setup@v6
+
+            - uses: actions/setup-node@v7
+              with:
+                  node-version-file: .node-version
+
+            - uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: 1.4.2
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile --filter @telecord/ingestion-cli
+
+            - name: Compile
+              run: pnpm --filter @telecord/ingestion-cli compile
+
+            - name: Write checksums
+              working-directory: cli/dist
+              run: sha256sum telecord-ingestion-* > checksums.txt
+
+            # Must match the cosign that the updater image installs, so both read the same bundle format.
+            - uses: sigstore/cosign-installer@v4.1.2
+              with:
+                  cosign-release: v3.0.6
+
+            - name: Sign the binaries and checksums
+              working-directory: cli/dist
+              run: |
+                  for file in telecord-ingestion-* checksums.txt; do
+                    cosign sign-blob --yes --bundle "$file.sigstore.json" "$file"
+                  done
+
+            - name: Verify the signatures
+              working-directory: cli/dist
+              run: |
+                  for file in telecord-ingestion-* checksums.txt; do
+                    case "$file" in
+                      *.sigstore.json) continue ;;
+                    esac
+
+                    cosign verify-blob "$file" \
+                      --bundle "$file.sigstore.json" \
+                      --certificate-identity-regexp '^https://github\.com/marioparaschiv/telecord-ingestion/\.github/workflows/cli-release\.yml@refs/tags/cli-v.*$' \
+                      --certificate-oidc-issuer https://token.actions.githubusercontent.com
+                  done
+
+            - name: Publish the release
+              working-directory: cli/dist
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  TAG: ${{ github.ref_name }}
+                  PRERELEASE: ${{ steps.target.outputs.prerelease }}
+              run: |
+                  if [ "$PRERELEASE" = true ]; then
+                    flag=--prerelease
+                  else
+                    flag=--latest
+                  fi
+
+                  gh release create "$TAG" \
+                    --repo "$GITHUB_REPOSITORY" \
+                    --verify-tag \
+                    --title "CLI ${TAG#cli-v}" \
+                    --generate-notes \
+                    "$flag" \
+                    ./*
