@@ -41,20 +41,17 @@ export async function readLimited(
  * first, then the file, which S3-style policies require to come last.
  *
  * @param upload - The presigned URL and its fields.
- * @param bytes - The file.
+ * @param file - The file, which a file-backed blob streams from disk as it is sent.
  * @returns The HTTP status the store answered with.
  */
-export async function postPresigned(
-	upload: IngestPresignedUpload,
-	bytes: Uint8Array<ArrayBuffer>,
-): Promise<number> {
+export async function postPresigned(upload: IngestPresignedUpload, file: Blob): Promise<number> {
 	const form = new FormData();
 
 	for (const [key, value] of Object.entries(upload.fields)) {
 		form.append(key, value);
 	}
 
-	form.append('file', new Blob([bytes]));
+	form.append('file', file);
 
 	const response = await fetch(upload.url, { method: 'POST', body: form });
 

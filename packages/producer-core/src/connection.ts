@@ -453,8 +453,12 @@ class IngestConnection {
 			return;
 		}
 
+		const progress = (bytes: number) => {
+			this.write(socket, encodeFrame(IngestOpcode.REQUEST_PROGRESS, { bytes }, nonce));
+		};
+
 		try {
-			for await (const result of handler.answer(d)) {
+			for await (const result of handler.answer(d, progress)) {
 				if (!this.write(socket, encodeFrame(handler.result, result, nonce))) {
 					this.logger.warn(
 						`Stopped answering ${op} ${nonce}: the frame could not be sent`,

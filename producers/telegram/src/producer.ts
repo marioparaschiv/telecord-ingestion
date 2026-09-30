@@ -22,6 +22,8 @@ type TelegramProducerOptions = {
 	outbox: Outbox;
 	/** The most events sent and not yet acknowledged. */
 	window: number;
+	/** Where files are written while `MEDIA_FETCH` downloads them. */
+	downloadDir: string;
 	onFatal: (reason: string) => void;
 };
 
@@ -31,7 +33,8 @@ type TelegramProducerOptions = {
  * route is declared at mtcute's TL layer, the layer every payload is
  * serialized at.
  *
- * @param options - The session, filter rules, server, outbox and fatal-refusal handler.
+ * @param options - The session, filter rules, server, outbox, download directory and
+ * fatal-refusal handler.
  * @returns The connection, not yet started, the update handlers to register on the client, and
  * the session monitor, which the connection reports the session's state from.
  */
@@ -42,6 +45,7 @@ export function createTelegramProducer({
 	apiKey,
 	outbox,
 	window,
+	downloadDir,
 	onFatal,
 }: TelegramProducerOptions) {
 	const session = createSessionMonitor(client, (state) => connection.reportSessionState(state));
@@ -66,7 +70,7 @@ export function createTelegramProducer({
 			return identity;
 		},
 		requests: {
-			...createTelegramRequests(client, filter),
+			...createTelegramRequests(client, filter, downloadDir),
 			[TelegramOpcode.CHATS_FETCH]: createTelegramSnapshot(client, filter),
 		},
 		onFatal,

@@ -1,4 +1,6 @@
 import {
+	Long,
+	MtPeerNotFoundError,
 	getMarkedPeerId,
 	parseMarkedPeerId,
 	type PeersIndex,
@@ -122,6 +124,30 @@ export async function subjectOfMarkedId(
 }
 
 /**
+ * Resolves a marked peer id to an input peer the way mtcute does: from the session's cache,
+ * including a min peer through a message it was seen in, then through its username or phone, then
+ * from Telegram itself.
+ *
+ * @param client - The session.
+ * @param markedId - The peer's marked id.
+ * @returns The input peer, or undefined when neither the cache nor Telegram can address it.
+ */
+export async function resolveInputPeer(
+	client: TelegramClient,
+	markedId: number,
+): Promise<tl.TypeInputPeer | undefined> {
+	try {
+		return await client.resolvePeer(markedId);
+	} catch (error) {
+		if (error instanceof MtPeerNotFoundError) {
+			return undefined;
+		}
+
+		throw error;
+	}
+}
+
+/**
  * The session's full, non-min copy of a basic group or channel, fetched from
  * Telegram when the cache holds none or only a min copy.
  *
@@ -139,6 +165,20 @@ export async function fetchFullChat(
 		return cached;
 	}
 
+	return fetchChat(client, markedId);
+}
+
+/**
+ * A basic group or channel as Telegram has it now, fetched even when the cache holds a copy.
+ *
+ * @param client - The session.
+ * @param markedId - The chat's marked id.
+ * @returns The chat, or undefined when the session cannot address it.
+ */
+export async function fetchChat(
+	client: TelegramClient,
+	markedId: number,
+): Promise<tl.TypeChat | undefined> {
 	const [kind, id] = parseMarkedPeerId(markedId);
 
 	if (kind === 'chat') {
@@ -151,7 +191,7 @@ export async function fetchFullChat(
 		return undefined;
 	}
 
-	const input = await client.storage.peers.getById(markedId);
+	const input = await resolveInputPeer(client, markedId);
 
 	if (!input) {
 		return undefined;
@@ -160,6 +200,39 @@ export async function fetchFullChat(
 	const { chats } = await client.call({ _: 'channels.getChannels', id: [toInputChannel(input)] });
 
 	return chats.find((chat) => chat.id === id);
+}
+
+/**
+ * The forbidden constructor Telegram itself answers with for a chat the session lost access to,
+ * carrying whatever access hash, title and kind the session held for it.
+ *
+ * @param markedId - The marked id of a basic group or channel.
+ * @param held - The session's last copy of the chat, if any.
+ * @returns `chatForbidden` for a basic group, `channelForbidden` for a channel or supergroup.
+ */
+export function forbiddenChatOf(
+	markedId: number,
+	held?: tl.TypeChat,
+): tl.RawChatForbidden | tl.RawChannelForbidden {
+	const [kind, id] = parseMarkedPeerId(markedId);
+	const title = (held && 'title' in held ? held.title : undefined) ?? '';
+
+	if (kind === 'chat') {
+		return { _: 'chatForbidden', id, title };
+	}
+
+	if (kind !== 'channel') {
+		throw new TypeError(`Expected a basic group or channel, got ${markedId}`);
+	}
+
+	return {
+		_: 'channelForbidden',
+		id,
+		accessHash: (held && 'accessHash' in held ? held.accessHash : undefined) ?? Long.ZERO,
+		title,
+		broadcast: held && 'broadcast' in held ? held.broadcast : undefined,
+		megagroup: held && 'megagroup' in held ? held.megagroup : undefined,
+	};
 }
 
 /**
@@ -180,8 +253,7 @@ export async function fetchFullUser(
 		return cached;
 	}
 
-	// Resolves through a message the user was seen in when only a min copy is known.
-	const input = await client.storage.peers.getById(userId);
+	const input = await resolveInputPeer(client, userId);
 
 	if (!input) {
 		return undefined;

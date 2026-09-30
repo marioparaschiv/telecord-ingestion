@@ -218,3 +218,164 @@ describe('Telegram filter rules', () => {
 		).toMatchObject({ ok: true });
 	});
 });
+
+describe('Telegram filter rules for pins and link previews', () => {
+	const ALLOWED_CHANNEL_ID = 1_234_567_890;
+	const ALLOWED_GROUP_ID = 4_222_333;
+	const DENIED_GROUP_ID = 4_111_222;
+
+	const DENY_CHANNEL_AND_GROUP: Filter = {
+		rules: [{ action: 'deny', match: { peerId: [CHANNEL_PEER_ID, `-${DENIED_GROUP_ID}`] } }],
+		fallback: 'allow',
+	};
+
+	/** An update that names no chat, so it is always forwarded, marking where the others stop. */
+	const SENTINEL = new RawUpdateInfo(
+		{ _: 'updateDeleteMessages', messages: [1], pts: 1, ptsCount: 1 },
+		new PeersIndex(),
+	);
+
+	function bare(update: tl.TypeUpdate): RawUpdateInfo {
+		return new RawUpdateInfo(update, new PeersIndex());
+	}
+
+	/** The updates forwarded until the sentinel, which the producer forwards in the order it got them. */
+	async function forwardedUntilSentinel(): Promise<tl.TypeUpdate[]> {
+		const forwarded: tl.TypeUpdate[] = [];
+
+		for (;;) {
+			const frame = await harness.socket.nextFrame();
+			const [update] = narrow(
+				decodeObject(TelegramUpdate.parse(frame.d).data),
+				'updates',
+			).updates;
+
+			if (!update || update._ === 'updateDeleteMessages') {
+				return forwarded;
+			}
+
+			forwarded.push(update);
+		}
+	}
+
+	function webPage(id: number): tl.RawWebPage {
+		return {
+			_: 'webPage',
+			id: Long.fromNumber(id),
+			url: `https://example.com/${id}`,
+			displayUrl: `example.com/${id}`,
+			hash: 0,
+		};
+	}
+
+	/** A message waiting on the link preview `webPageId`, in a basic group shipped in full. */
+	function linking(chatId: number, webPageId: number): RawUpdateInfo {
+		const group: tl.RawChat = {
+			_: 'chat',
+			id: chatId,
+			title: `Group ${chatId}`,
+			photo: { _: 'chatPhotoEmpty' },
+			participantsCount: 2,
+			date: 1_758_000_000,
+			version: 1,
+		};
+		const info = messageIn({ _: 'peerChat', chatId }, 'updateNewMessage', [group]);
+
+		if (info.update._ !== 'updateNewMessage' || info.update.message._ !== 'message') {
+			throw new Error('messageIn built no message');
+		}
+
+		return new RawUpdateInfo(
+			{
+				...info.update,
+				message: {
+					...info.update.message,
+					media: {
+						_: 'messageMediaWebPage',
+						webpage: { _: 'webPagePending', id: Long.fromNumber(webPageId), date: 1 },
+					},
+				},
+			},
+			info.peers,
+		);
+	}
+
+	it.each([
+		[
+			'updatePinnedChannelMessages',
+			(channelId: number): tl.TypeUpdate => ({
+				_: 'updatePinnedChannelMessages',
+				pinned: true,
+				channelId,
+				messages: [7],
+				pts: 1,
+				ptsCount: 1,
+			}),
+			CHANNEL_ID,
+			ALLOWED_CHANNEL_ID,
+		],
+		[
+			'updatePinnedMessages',
+			(chatId: number): tl.TypeUpdate => ({
+				_: 'updatePinnedMessages',
+				pinned: false,
+				peer: { _: 'peerChat', chatId },
+				messages: [7],
+				pts: 1,
+				ptsCount: 1,
+			}),
+			DENIED_GROUP_ID,
+			ALLOWED_GROUP_ID,
+		],
+		[
+			'updateChannelWebPage',
+			(channelId: number): tl.TypeUpdate => ({
+				_: 'updateChannelWebPage',
+				channelId,
+				webpage: webPage(1),
+				pts: 1,
+				ptsCount: 1,
+			}),
+			CHANNEL_ID,
+			ALLOWED_CHANNEL_ID,
+		],
+	])(
+		'forwards %s from an allowed chat and drops it from a denied one',
+		async (_, build, denied, allowed) => {
+			harness = await startHarness(DENY_CHANNEL_AND_GROUP);
+
+			const { producer } = harness;
+
+			producer.updates.onRawUpdate(bare(build(denied)));
+			producer.updates.onRawUpdate(bare(build(allowed)));
+			producer.updates.onRawUpdate(SENTINEL);
+
+			expect(await forwardedUntilSentinel()).toMatchObject([build(allowed)]);
+		},
+	);
+
+	it('forwards updateWebPage only for a preview an allowed message waited on, once', async () => {
+		harness = await startHarness(DENY_CHANNEL_AND_GROUP);
+
+		const { producer } = harness;
+		const loaded = (id: number): tl.TypeUpdate => ({
+			_: 'updateWebPage',
+			webpage: webPage(id),
+			pts: 1,
+			ptsCount: 1,
+		});
+
+		producer.updates.onRawUpdate(linking(ALLOWED_GROUP_ID, 11));
+		producer.updates.onRawUpdate(linking(DENIED_GROUP_ID, 12));
+		producer.updates.onRawUpdate(bare(loaded(12)));
+		producer.updates.onRawUpdate(bare(loaded(13)));
+		producer.updates.onRawUpdate(bare(loaded(11)));
+		producer.updates.onRawUpdate(bare(loaded(11)));
+		producer.updates.onRawUpdate(SENTINEL);
+
+		const forwarded = await forwardedUntilSentinel();
+
+		expect(forwarded.map(({ _ }) => _)).toEqual(['updateNewMessage', 'updateWebPage']);
+		expect(forwarded[1]).toMatchObject(loaded(11));
+	});
+});

@@ -2,9 +2,9 @@ import {
 	PeersIndex,
 	getMarkedPeerId,
 	parseMarkedPeerId,
+	tl,
 	type RawUpdateInfo,
 	type TelegramClient,
-	type tl,
 } from '@mtcute/node';
 
 import {
@@ -25,6 +25,7 @@ import { withSpan } from '@telecord/producer-otel';
 import {
 	fetchFullChat,
 	fetchFullUser,
+	forbiddenChatOf,
 	isChat,
 	isComplete,
 	replaceMinPeers,
@@ -37,15 +38,10 @@ type ForwardedUpdate = Extract<tl.TypeUpdate, { _: TelegramForwardedUpdate }>;
 const FORWARDED_UPDATES = new Set<string>(TELEGRAM_FORWARDED_UPDATES);
 
 /**
- * Updates the server must receive with the full, non-min chat they concern,
- * which for a private chat is the user. A message or edit can be the first the
- * server hears of a chat, and the full chat is what lets it store that chat.
+ * Chat state updates and reactions: once fetching their chat shows the session lost access to it,
+ * they are sent with the chat's forbidden constructor, which revokes it on the server.
  */
-const FULL_CHAT_UPDATES = new Set<string>([
-	'updateNewMessage',
-	'updateNewChannelMessage',
-	'updateEditMessage',
-	'updateEditChannelMessage',
+const CHAT_STATE_UPDATES = new Set<string>([
 	'updateChannel',
 	'updateChat',
 	'updateChatDefaultBannedRights',
@@ -55,11 +51,29 @@ const FULL_CHAT_UPDATES = new Set<string>([
 	'updateMessageReactions',
 ] satisfies TelegramForwardedUpdate[]);
 
+/**
+ * Updates the server must receive with the full, non-min chat they concern,
+ * which for a private chat is the user. A message or edit can be the first the
+ * server hears of a chat, and the full chat is what lets it store that chat.
+ */
+const FULL_CHAT_UPDATES = new Set<string>([
+	...CHAT_STATE_UPDATES,
+	...([
+		'updateNewMessage',
+		'updateNewChannelMessage',
+		'updateEditMessage',
+		'updateEditChannelMessage',
+	] satisfies TelegramForwardedUpdate[]),
+]);
+
 function isForwarded(update: tl.TypeUpdate): update is ForwardedUpdate {
 	return FORWARDED_UPDATES.has(update._);
 }
 
-/** The marked id of the chat an update concerns, or undefined when Telegram leaves it out. */
+/**
+ * The marked id of the chat an update concerns, or undefined when Telegram leaves it out. Exhaustive
+ * over the forwarded updates, so a newly forwarded one cannot reach the filter without its chat.
+ */
 function chatIdOf(update: ForwardedUpdate): number | undefined {
 	switch (update._) {
 		case 'updateNewMessage':
@@ -78,6 +92,8 @@ function chatIdOf(update: ForwardedUpdate): number | undefined {
 		case 'updateDeleteChannelMessages':
 		case 'updateChannel':
 		case 'updateChannelParticipant':
+		case 'updateChannelWebPage':
+		case 'updatePinnedChannelMessages':
 			return getMarkedPeerId(update.channelId, 'channel');
 
 		case 'updateChat':
@@ -89,8 +105,32 @@ function chatIdOf(update: ForwardedUpdate): number | undefined {
 
 		case 'updateChatDefaultBannedRights':
 		case 'updateMessageReactions':
+		case 'updatePinnedMessages':
 			return getMarkedPeerId(update.peer);
+
+		// A preview names no chat; it is forwarded only for a message the filter let through.
+		case 'updateWebPage':
+		// A user is no chat, so user updates are filtered by update type alone.
+		case 'updateUserName':
+		case 'updateUser':
+			return undefined;
+
+		default:
+			return update satisfies never;
 	}
+}
+
+/** The id of the link preview a message is still waiting on, if any. */
+function pendingWebPageOf(update: ForwardedUpdate): string | undefined {
+	if (!('message' in update) || update.message._ !== 'message') {
+		return undefined;
+	}
+
+	const { media } = update.message;
+
+	return media?._ === 'messageMediaWebPage' && media.webpage._ === 'webPagePending'
+		? media.webpage.id.toString()
+		: undefined;
 }
 
 /** The marked id of the channel a too-long difference is for, from the dialog it carries. */
@@ -127,7 +167,8 @@ type UpdateForwarderOptions = {
  * expanded short updates and recovered gaps; each forwarded update is boxed
  * in its own `updates` container with its peers, min peers replaced by the
  * session's complete copies and, for messages, chat state and reactions, the
- * full chat, or for a private chat the full user.
+ * full chat, or for a private chat the full user. A chat state update or reaction
+ * whose chat the session lost access to carries the chat's forbidden constructor.
  *
  * mtcute emits an update synchronously and saves its update state at the end
  * of the tick, so each update is captured in the outbox before its handler
@@ -143,6 +184,11 @@ type UpdateForwarderOptions = {
 export function createUpdateForwarder({ client, filter, outbox, send }: UpdateForwarderOptions) {
 	const logger = createTaggedLogger('Telegram Updates');
 	const { promise: started, resolve: start } = Promise.withResolvers<void>();
+	/**
+	 * Link previews that messages the filter let through are waiting on. Kept in memory, so a
+	 * preview that finishes loading after a restart is dropped.
+	 */
+	const pendingWebPages = new Set<string>();
 	let queue = started;
 
 	function enqueue(
@@ -172,6 +218,8 @@ export function createUpdateForwarder({ client, filter, outbox, send }: UpdateFo
 			return;
 		}
 
+		const revocable = kind !== 'user' && CHAT_STATE_UPDATES.has(update._);
+
 		try {
 			const full =
 				kind === 'user'
@@ -188,14 +236,47 @@ export function createUpdateForwarder({ client, filter, outbox, send }: UpdateFo
 				return;
 			}
 
+			if (revocable) {
+				await attachForbiddenChat(update, chatId, peers);
+
+				return;
+			}
+
 			logger.warn(
 				`Forwarding ${update._} without the full chat ${chatId}: it is not in the session`,
 			);
 		} catch (error) {
+			if (revocable && tl.RpcError.is(error, 'CHANNEL_PRIVATE')) {
+				await attachForbiddenChat(update, chatId, peers);
+
+				return;
+			}
+
 			logger.warn(
 				`Forwarding ${update._} without the full chat ${chatId}: ${asError(error).message}`,
 			);
 		}
+	}
+
+	/** Puts the forbidden constructor of a chat the session lost access to in place of its copy. */
+	async function attachForbiddenChat(
+		update: ForwardedUpdate,
+		chatId: number,
+		peers: PeersIndex,
+	): Promise<void> {
+		const [, id] = parseMarkedPeerId(chatId);
+		const held =
+			peers.chats.get(id) ?? (await client.storage.peers.getCompleteById(chatId, true));
+
+		peers.chats.set(id, forbiddenChatOf(chatId, held && isChat(held) ? held : undefined));
+		logger.warn(
+			`Forwarding ${update._} with ${chatId} forbidden: the session lost access to it`,
+		);
+	}
+
+	/** Whether a loaded preview is one an allowed message waited on, which it then no longer is. */
+	function isAwaited(webpage: tl.TypeWebPage): boolean {
+		return 'id' in webpage && pendingWebPages.delete(webpage.id.toString());
 	}
 
 	async function forwardUpdate(
@@ -212,10 +293,20 @@ export function createUpdateForwarder({ client, filter, outbox, send }: UpdateFo
 		};
 
 		return withSpan('telegram.update', attributes, async () => {
+			if (update._ === 'updateWebPage' && !isAwaited(update.webpage)) {
+				return undefined;
+			}
+
 			const chat = chatId === undefined ? {} : await subjectOfMarkedId(client, chatId, peers);
 
 			if (!isAllowed(filter, { ...chat, update: update._ })) {
 				return undefined;
+			}
+
+			const pending = pendingWebPageOf(update);
+
+			if (pending !== undefined) {
+				pendingWebPages.add(pending);
 			}
 
 			await replaceMinPeers(client, peers);

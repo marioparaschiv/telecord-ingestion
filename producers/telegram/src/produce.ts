@@ -1,3 +1,4 @@
+import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { OUTBOX_FILE, Outbox, createTaggedLogger, resolveFilter } from '@telecord/producer-core';
@@ -31,6 +32,11 @@ async function produce(config: TelegramConfig): Promise<void> {
 	});
 
 	const outbox = new Outbox(join(config.data_dir, OUTBOX_FILE));
+	const downloadDir = join(config.data_dir, 'downloads');
+
+	// A download a previous run was stopped in the middle of is never finished.
+	rmSync(downloadDir, { recursive: true, force: true });
+	mkdirSync(downloadDir, { recursive: true });
 
 	const { connection, updates, session } = createTelegramProducer({
 		client,
@@ -39,6 +45,7 @@ async function produce(config: TelegramConfig): Promise<void> {
 		apiKey: config.ingest.api_key,
 		outbox,
 		window: config.ingest.window,
+		downloadDir,
 		onFatal: (reason) => {
 			logger.error(`The ingest server refused this producer (${reason}), shutting down`);
 			void shutdown(1);

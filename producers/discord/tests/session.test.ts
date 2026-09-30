@@ -9,6 +9,7 @@ import { IngestOpcode, SessionState } from '@telecord/ingest-client';
 import { Outbox } from '@telecord/producer-core';
 
 import {
+	CLIENT_BUILD,
 	GENERAL_CHANNEL_ID,
 	GUILD_ID,
 	SELF,
@@ -217,6 +218,42 @@ describe('gateway session', () => {
 		);
 		// The replay and RESUMED follow the stored sequence.
 		expect(storedSession()).toMatchObject({ sessionId: previous.id, sequence: 5 });
+	});
+
+	it('identifies to Discord invisible and away, as the desktop client with its real builds', async () => {
+		const harness = await run();
+
+		expect(harness.gateway.identify).toMatchObject({
+			presence: { status: 'invisible', afk: true },
+			properties: {
+				os: 'Windows',
+				browser: 'Discord Client',
+				release_channel: 'stable',
+				client_version: CLIENT_BUILD.clientVersion,
+				client_build_number: CLIENT_BUILD.clientBuildNumber,
+				native_build_number: CLIENT_BUILD.nativeBuildNumber,
+			},
+		});
+		await vi.waitFor(() =>
+			expect(harness.gateway.presences).toContainEqual(
+				expect.objectContaining({ status: 'invisible', afk: true }),
+			),
+		);
+	});
+
+	it('goes invisible again after resuming a session stored while online', async () => {
+		await runAndStop();
+
+		gateway.answerResume = { outcome: 'resumed', dispatches: [] };
+
+		const harness = await run();
+
+		expect(harness.gateway.resumed).toBe(true);
+		await vi.waitFor(() =>
+			expect(harness.gateway.presences).toContainEqual(
+				expect.objectContaining({ status: 'invisible', afk: true }),
+			),
+		);
 	});
 
 	it('identifies anew when Discord invalidates the session, and tells the server it did not resume', async () => {

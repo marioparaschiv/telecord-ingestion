@@ -1,4 +1,10 @@
-export { defineProbe, defineRequest, defineSnapshot, type RequestHandler } from './requests';
+export {
+	defineProbe,
+	defineRequest,
+	defineSnapshot,
+	type ProgressReporter,
+	type RequestHandler,
+} from './requests';
 export { default as Outbox, OUTBOX_FILE, type OutboxCapture } from './outbox';
 export { default as createTaggedLogger, type TaggedLogger } from './logger';
 export { default as initLogger, type LoggerOptions } from './init-logger';

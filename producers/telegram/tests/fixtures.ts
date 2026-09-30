@@ -1,5 +1,17 @@
-import { Dialog, MemoryStorage, PeersIndex, TelegramClient, User, tl } from '@mtcute/node';
+import {
+	Dialog,
+	Long,
+	MemoryStorage,
+	MtPeerNotFoundError,
+	PeersIndex,
+	TelegramClient,
+	User,
+	tl,
+} from '@mtcute/node';
 import { TlBinaryReader, __tlReaderMap } from '@mtcute/node/utils.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { vi } from 'vitest';
 import { z } from 'zod';
 
@@ -191,6 +203,8 @@ export type Harness = {
 	producer: ReturnType<typeof createTelegramProducer>;
 	socket: FakeProducerSocket;
 	outbox: Outbox;
+	/** Where the producer writes a file while `MEDIA_FETCH` downloads it. */
+	downloadDir: string;
 	close: () => Promise<void>;
 };
 
@@ -208,6 +222,7 @@ export async function startHarness(filter: Filter = DEFAULT_FILTER): Promise<Har
 	await seedPeers(client, vectorUpdates());
 
 	const outbox = new Outbox(':memory:');
+	const downloads = createDownloadDir();
 	const producer = createTelegramProducer({
 		client,
 		filter,
@@ -215,6 +230,7 @@ export async function startHarness(filter: Filter = DEFAULT_FILTER): Promise<Har
 		apiKey: bindings.key,
 		outbox,
 		window: 500,
+		downloadDir: downloads.path,
 		onFatal: (reason) => {
 			throw new Error(`Unexpected fatal refusal: ${reason}`);
 		},
@@ -234,13 +250,26 @@ export async function startHarness(filter: Filter = DEFAULT_FILTER): Promise<Har
 		producer,
 		socket,
 		outbox,
+		downloadDir: downloads.path,
 		async close() {
 			producer.connection.stop();
 			await server.close();
 			await client.destroy();
 			outbox.close();
+			downloads.remove();
 		},
 	};
+}
+
+/**
+ * A directory for a producer's downloads that only this run uses.
+ *
+ * @returns The directory, and `remove` to delete it with whatever is left in it.
+ */
+export function createDownloadDir(): { path: string; remove: () => void } {
+	const path = mkdtempSync(join(tmpdir(), 'telegram-downloads-'));
+
+	return { path, remove: () => rmSync(path, { recursive: true, force: true }) };
 }
 
 /**
@@ -257,6 +286,35 @@ export async function seedPeers(
 	for (const peer of [...(peers.users ?? []), ...(peers.chats ?? [])]) {
 		await client.storage.peers.store(peer);
 	}
+}
+
+/**
+ * Fails every fetch of a channel the session no longer holds a complete copy of.
+ *
+ * @param client - The session.
+ * @param channel - The channel.
+ * @param failure - `unresolvable` when the session can no longer resolve the channel, otherwise the
+ * error Telegram answers the fetch with.
+ */
+export function failChannelFetch(
+	client: TelegramClient,
+	channel: tl.RawChannel,
+	failure: 'unresolvable' | tl.RpcError,
+): void {
+	vi.spyOn(client, 'resolvePeer').mockImplementation(async (peerId) => {
+		if (failure === 'unresolvable') {
+			throw new MtPeerNotFoundError(`Peer ${String(peerId)} is not found in local cache`);
+		}
+
+		return {
+			_: 'inputPeerChannel',
+			channelId: channel.id,
+			accessHash: channel.accessHash ?? Long.ZERO,
+		};
+	});
+	vi.spyOn(client, 'call').mockRejectedValue(
+		failure === 'unresolvable' ? new Error('No call expected') : failure,
+	);
 }
 
 /**

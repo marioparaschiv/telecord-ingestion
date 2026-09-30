@@ -1,5 +1,5 @@
+import { PeersIndex, RawUpdateInfo, getMarkedPeerId, tl } from '@mtcute/node';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
-import { PeersIndex, RawUpdateInfo, getMarkedPeerId, type tl } from '@mtcute/node';
 
 import { TelegramUpdate } from '@telecord/ingest-client/telegram';
 import { Outbox, type Filter } from '@telecord/producer-core';
@@ -7,6 +7,7 @@ import { Outbox, type Filter } from '@telecord/producer-core';
 import {
 	DEFAULT_FILTER,
 	decodeObject,
+	failChannelFetch,
 	narrow,
 	startHarness,
 	vectorUpdates,
@@ -16,6 +17,7 @@ import { createUpdateForwarder } from '../src/updates';
 import { serialize } from '../src/tl';
 
 const CHANNEL_ID = 1_987_654_321;
+const UNCACHED_CHANNEL_ID = 1_555_000_111;
 const GROUP_ID = 4_123_456;
 const DM_USER_ID = 5_551_234_567;
 
@@ -56,6 +58,13 @@ function vectorPeers() {
 	}
 
 	return { user, channel };
+}
+
+/** A min copy of the vectors' channel, under an id the session holds nothing for. */
+function uncachedMinChannel(): tl.RawChannel {
+	const { channel } = vectorPeers();
+
+	return { ...channel, id: UNCACHED_CHANNEL_ID, min: true, username: undefined };
 }
 
 /** A too-long difference of the vectors' channel, carrying its one message. */
@@ -329,6 +338,119 @@ describe('Telegram update forwarding', () => {
 		expect(forwarded.users).toMatchObject([contact]);
 		expect(call).not.toHaveBeenCalled();
 	});
+
+	it('ships chatForbidden with a state update for a basic group Telegram no longer returns', async () => {
+		harness = await startHarness();
+
+		const { client, producer } = harness;
+
+		vi.spyOn(client, 'call').mockResolvedValue({ _: 'messages.chats', chats: [] });
+
+		producer.updates.onRawUpdate(
+			new RawUpdateInfo({ _: 'updateChat', chatId: GROUP_ID }, new PeersIndex()),
+		);
+
+		const forwarded = narrow(await nextForwarded(), 'updates');
+
+		expect(forwarded.chats).toEqual([{ _: 'chatForbidden', id: GROUP_ID, title: '' }]);
+	});
+
+	it('ships channelForbidden with a reaction update once Telegram answers CHANNEL_PRIVATE', async () => {
+		harness = await startHarness();
+
+		const { client, producer } = harness;
+		const channel = uncachedMinChannel();
+
+		failChannelFetch(client, channel, new tl.RpcError(400, 'CHANNEL_PRIVATE'));
+
+		producer.updates.onRawUpdate(
+			new RawUpdateInfo(
+				{
+					_: 'updateMessageReactions',
+					peer: { _: 'peerChannel', channelId: UNCACHED_CHANNEL_ID },
+					msgId: 42,
+					reactions: { _: 'messageReactions', results: [] },
+				},
+				PeersIndex.from({ chats: [channel] }),
+			),
+		);
+
+		const forwarded = narrow(await nextForwarded(), 'updates');
+
+		expect(forwarded.chats).toMatchObject([
+			{
+				_: 'channelForbidden',
+				id: UNCACHED_CHANNEL_ID,
+				accessHash: channel.accessHash,
+				title: channel.title,
+				megagroup: true,
+			},
+		]);
+	});
+
+	it('ships the chat it has with a state update when fetching the chat fails transiently', async () => {
+		harness = await startHarness();
+
+		const { client, producer } = harness;
+		const channel = uncachedMinChannel();
+
+		failChannelFetch(client, channel, new tl.RpcError(500, 'INTERNAL_SERVER_ERROR'));
+
+		producer.updates.onRawUpdate(
+			new RawUpdateInfo(
+				{ _: 'updateChannel', channelId: UNCACHED_CHANNEL_ID },
+				PeersIndex.from({ chats: [channel] }),
+			),
+		);
+
+		const forwarded = narrow(await nextForwarded(), 'updates');
+
+		expect(forwarded.chats).toEqual([channel]);
+	});
+
+	it.each([
+		['updateNewChannelMessage', 'CHANNEL_PRIVATE'],
+		['updateNewChannelMessage', 'unresolvable'],
+		['updateEditChannelMessage', 'CHANNEL_PRIVATE'],
+		['updateEditChannelMessage', 'unresolvable'],
+	] as const)(
+		'never ships a forbidden chat with %s once the channel is %s',
+		async (kind, cause) => {
+			harness = await startHarness();
+
+			const { client, producer } = harness;
+			const channel = uncachedMinChannel();
+			const [update] = vectorUpdates().updates;
+
+			if (update?._ !== 'updateNewChannelMessage' || update.message._ !== 'message') {
+				throw new Error('event/update carries no channel message');
+			}
+
+			failChannelFetch(
+				client,
+				channel,
+				cause === 'unresolvable' ? cause : new tl.RpcError(400, cause),
+			);
+
+			producer.updates.onRawUpdate(
+				new RawUpdateInfo(
+					{
+						...update,
+						_: kind,
+						message: {
+							...update.message,
+							peerId: { _: 'peerChannel', channelId: UNCACHED_CHANNEL_ID },
+						},
+					},
+					PeersIndex.from({ chats: [channel] }),
+				),
+			);
+
+			const forwarded = narrow(await nextForwarded(), 'updates');
+
+			expect(forwarded.chats).toEqual([channel]);
+		},
+	);
 
 	it('forwards only the thirteen update constructors', async () => {
 		harness = await startHarness();

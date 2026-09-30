@@ -1,6 +1,6 @@
 import type { TelegramClient } from '@mtcute/node';
 
-import type { TelegramIdentifyPayload } from '@telecord/ingest-client/telegram';
+import { TelegramOpcode, type TelegramIdentifyPayload } from '@telecord/ingest-client/telegram';
 
 /**
  * The account as `IDENTIFY` names it, read fresh from Telegram. Absent fields
@@ -35,6 +35,7 @@ async function identify(
 		...(photo?._ === 'userProfilePhoto' && {
 			photo: { _: 'userProfilePhoto', photoId: photo.photoId.toString(), dcId: photo.dcId },
 		}),
+		requests: [TelegramOpcode.CUSTOM_EMOJIS_FETCH, TelegramOpcode.FORUM_TOPICS_FETCH],
 		recovered,
 	};
 }
