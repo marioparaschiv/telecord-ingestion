@@ -1,67 +1,71 @@
 import '@telecord/producer-otel/register';
 import './logging';
 
-import { join } from 'node:path';
-
-import { OUTBOX_FILE, Outbox, createTaggedLogger, parseEnv } from '@telecord/producer-core';
 import { shutdown as shutdownTelemetry } from '@telecord/producer-otel';
+import { asError, createTaggedLogger } from '@telecord/producer-core';
+import { loadConfig } from '@telecord/producer-core/config';
 
-import { createTelegramProducer } from './producer';
+import {
+	TELEGRAM_CONFIG_SECTION,
+	TelegramConfigSchema,
+	TelegramSessionConfigSchema,
+} from './config';
+import listTelegramChats from './list-chats';
 import createTelegramClient from './client';
-import { TelegramEnvSchema } from './env';
+import produce from './produce';
+import logIn from './login';
 
-const env = parseEnv(TelegramEnvSchema);
 const logger = createTaggedLogger('Telegram Producer');
 
-const client = createTelegramClient({
-	apiId: env.TELEGRAM_API_ID,
-	apiHash: env.TELEGRAM_API_HASH,
-	dataDir: env.DATA_DIR,
-	onChannelTooLong: (_channelId, difference) => updates.onChannelTooLong(difference),
-	onUnauthorized: (reason) => session.onUnauthorized(reason),
-	onUpdatesSkipped: (reason) => session.onUpdatesSkipped(reason),
-});
+/**
+ * Runs `login` or `list-chats` on the saved session, printing its result to stdout.
+ *
+ * @returns The exit code.
+ */
+async function runMode(args: readonly string[]): Promise<number> {
+	const [mode] = args;
 
-const outbox = new Outbox(join(env.DATA_DIR, OUTBOX_FILE));
+	if (args.length !== 1 || (mode !== 'login' && mode !== 'list-chats')) {
+		logger.error(`Unknown arguments "${args.join(' ')}": expected login or list-chats`);
 
-const { connection, updates, session } = createTelegramProducer({
-	client,
-	filter: { rules: env.FILTER_RULES, fallback: env.FILTER_DEFAULT },
-	url: env.INGEST_URL,
-	apiKey: env.INGEST_API_KEY,
-	outbox,
-	window: env.INGEST_WINDOW,
-	onFatal: (reason) => {
-		logger.error(`The ingest server refused this producer (${reason}), shutting down`);
-		void shutdown(1);
-	},
-});
+		return 2;
+	}
 
-async function shutdown(code = 0): Promise<void> {
-	connection.stop();
-	await client.destroy();
-	outbox.close();
+	const config = loadConfig(TelegramSessionConfigSchema, { section: TELEGRAM_CONFIG_SECTION });
+	const client = createTelegramClient({
+		apiId: config.api_id,
+		apiHash: config.api_hash,
+		dataDir: config.data_dir,
+	});
+
+	try {
+		const output =
+			mode === 'login'
+				? await logIn(client, (prompt) => client.input(prompt))
+				: JSON.stringify(await listTelegramChats(client));
+
+		process.stdout.write(`${output}\n`);
+
+		return 0;
+	} catch (error) {
+		const { message } = asError(error);
+
+		// A failed login already names the step it failed at.
+		logger.error(mode === 'login' ? message : `Failed to list the Telegram chats: ${message}`);
+
+		return 1;
+	} finally {
+		await client.destroy();
+	}
+}
+
+const args = process.argv.slice(2);
+
+if (args.length === 0) {
+	await produce(loadConfig(TelegramConfigSchema, { section: TELEGRAM_CONFIG_SECTION }));
+} else {
+	const code = await runMode(args);
+
 	await shutdownTelemetry();
 	process.exit(code);
 }
-
-client.onError.add((error) => logger.error(`Telegram client error: ${error.message}`));
-client.onRawUpdate.add((info) => updates.onRawUpdate(info));
-
-// Prompts on the terminal only when the session in DATA_DIR holds no authorization yet.
-const me = await client.start({
-	phone: () => client.input('Phone number (international format): '),
-	code: () => client.input('Login code: '),
-	password: () => client.input('2FA password: '),
-});
-
-logger.info(`Logged in to Telegram as ${me.displayName} (${me.id})`);
-
-process.once('SIGINT', () => void shutdown());
-process.once('SIGTERM', () => void shutdown());
-
-updates.start();
-
-// IDENTIFY reports whether the catch-up that logging in starts recovered every update.
-await session.caughtUp();
-connection.start();

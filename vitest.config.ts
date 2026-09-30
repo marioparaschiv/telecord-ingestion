@@ -7,6 +7,7 @@ const config = defineConfig({
 			'producers/discord',
 			'packages/producer-core',
 			'packages/producer-otel',
+			'cli',
 		],
 	},
 });

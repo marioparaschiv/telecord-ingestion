@@ -6,12 +6,14 @@
 	"packageManager": "pnpm@12.3.4",
 	"scripts": {
 		"build": "pnpm -r --if-present run build",
+		"readme": "pnpm --filter @telecord/ingestion-cli readme",
+		"readme:check": "pnpm --filter @telecord/ingestion-cli readme --check",
 		"test": "vitest run",
 		"typecheck": "pnpm -r --if-present run typecheck",
-		"lint": "oxlint --config .oxlintrc.json packages producers",
-		"lint:fix": "oxlint --config .oxlintrc.json --fix-dangerously packages producers",
-		"format": "oxfmt --config .oxfmtrc.json packages producers",
-		"format:check": "oxfmt --config .oxfmtrc.json --check packages producers"
+		"lint": "oxlint --config .oxlintrc.json packages producers cli",
+		"lint:fix": "oxlint --config .oxlintrc.json --fix-dangerously packages producers cli",
+		"format": "oxfmt --config .oxfmtrc.json packages producers cli",
+		"format:check": "oxfmt --config .oxfmtrc.json --check packages producers cli"
 	},
 	"devDependencies": {
 		"@stylistic/eslint-plugin": "^5.10.0",

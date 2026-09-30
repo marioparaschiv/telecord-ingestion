@@ -1,11 +1,13 @@
 #!/bin/sh
-# Sets up the Telecord ingestion producers with Docker Compose.
+# Installs the telecord-ingestion CLI, then runs its setup with any arguments given.
 #
 #   curl -fsSL https://raw.githubusercontent.com/marioparaschiv/telecord-ingestion/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/marioparaschiv/telecord-ingestion/main/install.sh | sh -s -- --yes
 set -eu
 
-SOURCE="${TELECORD_INGESTION_SOURCE:-https://raw.githubusercontent.com/marioparaschiv/telecord-ingestion/main}"
-BASE='wss://ingest.telecord.app'
+RELEASES="${TELECORD_INGESTION_RELEASES:-https://api.github.com/repos/marioparaschiv/telecord-ingestion/releases}"
+NAME='telecord-ingestion'
+BIN_DIR="$HOME/.local/bin"
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
 	BOLD=$(printf '\033[1m')
@@ -34,248 +36,161 @@ fail() {
 	exit 1
 }
 
-# curl pipes this script through stdin, so every prompt reads the terminal directly.
-read_tty() {
-	IFS= read -r REPLY < /dev/tty || fail "Input closed."
-}
+detect_asset() {
+	case "$(uname -s)" in
+		Linux) os=linux ;;
+		Darwin) os=darwin ;;
+		*) fail "No telecord-ingestion build for $(uname -s). Use install.ps1 on Windows." ;;
+	esac
 
-# ask <variable> <prompt> [default]
-ask() {
-	while :; do
-		if [ -n "${3:-}" ]; then
-			printf '  %s %s(%s)%s: ' "$2" "$DIM" "$3" "$RESET"
-		else
-			printf '  %s: ' "$2"
-		fi
-
-		read_tty
-		REPLY="${REPLY:-${3:-}}"
-
-		if [ -n "$REPLY" ]; then
-			break
-		fi
-
-		say "  ${RED}Required.${RESET}"
-	done
-
-	eval "$1=\$REPLY"
-}
-
-# ask_secret <variable> <prompt>
-ask_secret() {
-	while :; do
-		printf '  %s %s(hidden)%s: ' "$2" "$DIM" "$RESET"
-		stty -echo < /dev/tty
-		trap 'stty echo < /dev/tty' EXIT
-		read_tty
-		stty echo < /dev/tty
-		trap - EXIT
-		printf '\n'
-
-		if [ -n "$REPLY" ]; then
-			break
-		fi
-
-		say "  ${RED}Required.${RESET}"
-	done
-
-	eval "$1=\$REPLY"
-}
-
-# confirm <prompt> <y|n>, succeeding on yes.
-confirm() {
-	if [ "$2" = y ]; then
-		hint='Y/n'
-	else
-		hint='y/N'
+	# The Linux builds link against glibc.
+	if [ "$os" = linux ] && ldd --version 2>&1 | grep -qi musl; then
+		fail "No telecord-ingestion build for musl-based Linux such as Alpine."
 	fi
 
-	while :; do
-		printf '  %s %s(%s)%s: ' "$1" "$DIM" "$hint" "$RESET"
-		read_tty
-
-		case "${REPLY:-$2}" in
-			[Yy] | [Yy][Ee][Ss]) return 0 ;;
-			[Nn] | [Nn][Oo]) return 1 ;;
-		esac
-	done
-}
-
-compose() {
-	docker compose --project-directory "$DIR" "$@"
-}
-
-if ! (: < /dev/tty) 2> /dev/null; then
-	fail "No terminal to prompt on. Run this from an interactive shell."
-fi
-
-printf '\n%s  Telecord Ingestion%s\n' "$ACCENT$BOLD" "$RESET"
-say "  ${DIM}Connect your Telegram and Discord accounts to Telecord.${RESET}"
-
-step "1. Checking Docker"
-
-command -v docker > /dev/null 2>&1 || fail "Docker is not installed. Get it from https://docs.docker.com/get-docker/"
-docker compose version > /dev/null 2>&1 || fail "Docker Compose v2 is missing. Update Docker, then run this again."
-docker info > /dev/null 2>&1 || fail "Cannot reach the Docker daemon. Start Docker, or add your user to the docker group."
-ok "Docker is ready"
-
-step "2. Choose platforms"
-
-say "  1) Telegram"
-say "  2) Discord"
-say "  3) Both"
-
-choice=''
-
-while :; do
-	ask choice "Platform" 3
-
-	case "$choice" in
-		1) TELEGRAM=1 DISCORD=0 ;;
-		2) TELEGRAM=0 DISCORD=1 ;;
-		3) TELEGRAM=1 DISCORD=1 ;;
-		*) continue ;;
+	case "$(uname -m)" in
+		x86_64 | amd64) arch=x64 ;;
+		aarch64 | arm64) arch=arm64 ;;
+		*) fail "No telecord-ingestion build for the $(uname -m) architecture." ;;
 	esac
 
-	break
-done
+	# A shell running under Rosetta reports x86_64 on Apple silicon.
+	if [ "$os" = darwin ] && [ "$arch" = x64 ] && [ "$(sysctl -n sysctl.proc_translated 2> /dev/null)" = 1 ]; then
+		arch=arm64
+	fi
 
-step "3. Install location"
+	ASSET="$NAME-$os-$arch"
+}
 
-ask DIR "Directory" "$HOME/telecord-ingestion"
+# Scans the release list without a JSON parser. GitHub lists each release's tag_name
+# before its draft and prerelease flags, and escapes the quotes in any free text.
+latest_tag() {
+	printf '%s' "$RELEASES_JSON" |
+		grep -Eo '"(tag_name|draft|prerelease)": *("[^"]*"|true|false)' |
+		awk '
+			/^"tag_name"/ { split($0, part, "\""); tag = part[4]; draft = ""; prerelease = ""; next }
+			/^"draft"/ { draft = /true$/ }
+			/^"prerelease"/ { prerelease = /true$/ }
+			tag != "" && draft != "" && prerelease != "" {
+				if (tag ~ /^cli-v[0-9]+\.[0-9]+\.[0-9]+/ && !draft && !prerelease) {
+					print tag
+					exit
+				}
 
-# Expands a ~ the user typed, which the shell does not do for read input.
-# shellcheck disable=SC2088
-case "$DIR" in
-	"~") DIR="$HOME" ;;
-	"~/"*) DIR="$HOME/${DIR#"~/"}" ;;
-esac
+				tag = ""
+			}
+		'
+}
 
-if [ -e "$DIR/.env" ] && ! confirm "$DIR already has an install. Overwrite its settings?" n; then
-	fail "Stopped without changes."
-fi
+# asset_url <file>
+asset_url() {
+	printf '%s' "$RELEASES_JSON" |
+		grep -Eo '"browser_download_url": *"[^"]*"' |
+		sed 's/.*"\([^"]*\)"$/\1/' |
+		awk -v suffix="/$TAG/$1" 'substr($0, length($0) - length(suffix) + 1) == suffix { print; exit }'
+}
 
-if [ "$TELEGRAM" = 1 ]; then
-	step "4. Telegram"
+# download <file> <destination>
+download() {
+	url=$(asset_url "$1")
+	[ -n "$url" ] || fail "Release $TAG has no $1."
+	curl -fsSL "$url" -o "$2" || fail "Could not download $1 from $url"
+}
 
-	say "  ${DIM}Create an app at https://my.telegram.org to get an API id and hash.${RESET}"
+sha256() {
+	if command -v sha256sum > /dev/null 2>&1; then
+		sha256sum "$1" | awk '{ print $1 }'
+	elif command -v shasum > /dev/null 2>&1; then
+		shasum -a 256 "$1" | awk '{ print $1 }'
+	else
+		fail "Neither sha256sum nor shasum is installed, so the download cannot be verified."
+	fi
+}
 
-	while :; do
-		ask TELEGRAM_API_ID "API id"
+# Appends a PATH entry to the profile of the user's login shell.
+add_to_path() {
+	# shellcheck disable=SC2016
+	line='export PATH="$HOME/.local/bin:$PATH"'
 
-		case "$TELEGRAM_API_ID" in
-			*[!0-9]*) say "  ${RED}The API id is a number.${RESET}" ;;
-			*) break ;;
-		esac
-	done
-
-	ask_secret TELEGRAM_API_HASH "API hash"
-	ask_secret TELEGRAM_KEY "Telecord API key for this account"
-fi
-
-if [ "$DISCORD" = 1 ]; then
-	step "$((4 + TELEGRAM)). Discord"
-
-	ask_secret DISCORD_TOKEN "Account token"
-	ask_secret DISCORD_KEY "Telecord API key for this account"
-fi
-
-step "$((4 + TELEGRAM + DISCORD)). Options"
-
-say "  ${DIM}Direct messages are private by default. You can change this later in the .env files.${RESET}"
-
-if confirm "Share direct messages too?" n; then
-	FILTER='FILTER_RULES=[]'
-else
-	FILTER=''
-fi
-
-say "  ${DIM}The updater installs new releases once their signature is verified. It needs access to the Docker socket.${RESET}"
-
-if confirm "Install updates automatically?" y; then
-	UPDATER=1
-else
-	UPDATER=0
-fi
-
-step "Setting up $DIR"
-
-mkdir -p "$DIR"
-curl -fsSL "$SOURCE/compose.yml" -o "$DIR/compose.yml" || fail "Could not download compose.yml from $SOURCE"
-ok "Downloaded compose.yml"
-
-PROFILES=''
-
-if [ "$TELEGRAM" = 1 ]; then
-	PROFILES="${PROFILES}telegram,"
-fi
-
-if [ "$DISCORD" = 1 ]; then
-	PROFILES="${PROFILES}discord,"
-fi
-
-if [ "$UPDATER" = 1 ]; then
-	PROFILES="${PROFILES}updater,"
-fi
-
-# The env files hold account credentials.
-umask 077
-
-printf 'COMPOSE_PROFILES=%s\n' "${PROFILES%,}" > "$DIR/.env"
-ok "Wrote .env"
-
-if [ "$TELEGRAM" = 1 ]; then
-	{
-		printf 'INGEST_URL=%s/telegram/v1\n' "$BASE"
-		printf 'INGEST_API_KEY=%s\n' "$TELEGRAM_KEY"
-		printf 'TELEGRAM_API_ID=%s\n' "$TELEGRAM_API_ID"
-		printf 'TELEGRAM_API_HASH=%s\n' "$TELEGRAM_API_HASH"
-		[ -z "$FILTER" ] || printf '%s\n' "$FILTER"
-	} > "$DIR/telegram.env"
-	ok "Wrote telegram.env"
-fi
-
-if [ "$DISCORD" = 1 ]; then
-	{
-		printf 'INGEST_URL=%s/discord/v1\n' "$BASE"
-		printf 'INGEST_API_KEY=%s\n' "$DISCORD_KEY"
-		printf 'DISCORD_TOKEN=%s\n' "$DISCORD_TOKEN"
-		[ -z "$FILTER" ] || printf '%s\n' "$FILTER"
-	} > "$DIR/discord.env"
-	ok "Wrote discord.env"
-fi
-
-step "Downloading images"
-
-compose pull --quiet || fail "Could not pull the images."
-ok "Images are up to date"
-
-if [ "$TELEGRAM" = 1 ]; then
-	step "Log in to Telegram"
-
-	say "  Answer the phone, code and 2FA prompts."
-	say "  When you see ${BOLD}Logged in to Telegram${RESET}, press ${BOLD}Ctrl+C${RESET} to continue."
-	say ""
-
-	# Ctrl+C ends the login container, not this script.
-	trap : INT
-	status=0
-	compose run --rm telegram < /dev/tty || status=$?
-	trap - INT
-
-	case "$status" in
-		0 | 130) ok "Telegram session saved" ;;
-		*) fail "The Telegram login exited with status $status. Run this installer again to retry." ;;
+	case "$(basename "${SHELL:-sh}")" in
+		zsh) profile="${ZDOTDIR:-$HOME}/.zshrc" ;;
+		bash)
+			if [ "$(uname -s)" = Darwin ]; then
+				profile="$HOME/.bash_profile"
+			else
+				profile="$HOME/.bashrc"
+			fi
+			;;
+		fish)
+			profile="$HOME/.config/fish/config.fish"
+			# shellcheck disable=SC2016
+			line='fish_add_path "$HOME/.local/bin"'
+			;;
+		*) profile="$HOME/.profile" ;;
 	esac
-fi
 
-step "Starting"
+	if [ -f "$profile" ] && grep -Fqx "$line" "$profile"; then
+		return
+	fi
 
-compose up --detach --quiet-pull || fail "Could not start the services."
-compose ps
+	mkdir -p "$(dirname "$profile")"
+	printf '\n%s\n' "$line" >> "$profile"
+	ok "Added $BIN_DIR to PATH in $profile"
+	say "  ${DIM}Open a new terminal to run $NAME by name.${RESET}"
+}
 
-printf '\n%sDone.%s Telecord ingestion is running in %s\n\n' "$ACCENT$BOLD" "$RESET" "$DIR"
-say "  Logs     cd \"$DIR\" && docker compose logs -f"
-say "  Stop     cd \"$DIR\" && docker compose down"
-say "  Filters  edit the .env files, then run: docker compose up -d"
-say ""
+main() {
+	command -v curl > /dev/null 2>&1 || fail "curl is not installed."
+
+	printf '\n%s  Telecord Ingestion%s\n' "$ACCENT$BOLD" "$RESET"
+
+	step "1. Finding the latest release"
+
+	detect_asset
+	RELEASES_JSON=$(curl -fsSL -H 'Accept: application/vnd.github+json' "$RELEASES?per_page=100") ||
+		fail "Could not list the releases at $RELEASES"
+	TAG=$(latest_tag)
+	[ -n "$TAG" ] || fail "No stable $NAME release found at $RELEASES"
+	ok "$NAME ${TAG#cli-v} for ${ASSET#"$NAME-"}"
+
+	step "2. Downloading"
+
+	mkdir -p "$BIN_DIR"
+	# Staged beside the destination so the final move is an atomic rename.
+	staging=$(mktemp -d "$BIN_DIR/.$NAME.XXXXXX")
+	trap 'rm -rf "$staging"' EXIT
+
+	download checksums.txt "$staging/checksums.txt"
+	download "$ASSET" "$staging/$ASSET"
+
+	expected=$(awk -v file="$ASSET" '$2 == file || $2 == "*" file { print tolower($1); exit }' "$staging/checksums.txt")
+	[ -n "$expected" ] || fail "checksums.txt lists no checksum for $ASSET"
+	actual=$(sha256 "$staging/$ASSET")
+	[ "$actual" = "$expected" ] || fail "Checksum mismatch for $ASSET: expected $expected, got $actual. Nothing was installed."
+	ok "Checksum verified"
+
+	step "3. Installing"
+
+	chmod 755 "$staging/$ASSET"
+	mv -f "$staging/$ASSET" "$BIN_DIR/$NAME"
+	rm -rf "$staging"
+	trap - EXIT
+	ok "Installed $BIN_DIR/$NAME"
+
+	case ":$PATH:" in
+		*":$BIN_DIR:"*) ;;
+		*) add_to_path ;;
+	esac
+
+	step "4. Setting up"
+
+	# curl pipes this script through stdin, so setup reads the terminal directly.
+	if (: < /dev/tty) 2> /dev/null; then
+		exec "$BIN_DIR/$NAME" setup "$@" < /dev/tty
+	fi
+
+	exec "$BIN_DIR/$NAME" setup "$@"
+}
+
+# Called last so a download cut short runs nothing.
+main "$@"

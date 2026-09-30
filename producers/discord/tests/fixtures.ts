@@ -9,13 +9,14 @@ import {
 	type VectorBindings,
 } from '@telecord/producer-core/testing';
 import discordVectors from '@telecord/ingest-client/vectors/discord.json' with { type: 'json' };
+import { Outbox, resolveFilter, type Filter } from '@telecord/producer-core';
 import type { IngestEnvelope } from '@telecord/ingest-client';
-import { Outbox, type Filter } from '@telecord/producer-core';
 import { IngestOpcode } from '@telecord/ingest-client';
 
 import { FakeDiscordGateway, type GatewaySession } from './fake-gateway';
 import { createDiscordProducer } from '../src/producer';
-import { DiscordEnvSchema } from '../src/env';
+import { DiscordConfigSchema } from '../src/config';
+import { DISCORD_FORWARD } from '../src/filter';
 import { loadSession } from '../src/session';
 
 export const SELF = {
@@ -53,10 +54,10 @@ export const FRIEND = {
 };
 
 /** The filter a producer starts with when no rules are configured. */
-export const DEFAULT_FILTER: Filter = {
-	rules: DiscordEnvSchema.shape.FILTER_RULES.parse(undefined),
-	fallback: DiscordEnvSchema.shape.FILTER_DEFAULT.parse(undefined),
-};
+export const DEFAULT_FILTER: Filter = resolveFilter(
+	{ filter: DiscordConfigSchema.shape.filter.parse({}), forward: {} },
+	DISCORD_FORWARD,
+);
 
 /**
  * Finds a vector by id.

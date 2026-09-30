@@ -26,7 +26,7 @@ const FORUM_TOPICS_PAGE_LIMIT = 100;
 const PART_MAX_TOPIC_PAGES = 1_000;
 
 /** The most chats and users one snapshot may name together. */
-const SNAPSHOT_MAX_PEERS = 50_000;
+export const SNAPSHOT_MAX_PEERS = 50_000;
 
 /** The most topics one snapshot may carry. */
 const SNAPSHOT_MAX_TOPICS = 100_000;

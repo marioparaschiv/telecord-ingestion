@@ -11,10 +11,11 @@ import {
 	type VectorFrame,
 } from '@telecord/producer-core/testing';
 import telegramVectors from '@telecord/ingest-client/vectors/telegram.json' with { type: 'json' };
-import { Outbox, type Filter } from '@telecord/producer-core';
+import { Outbox, resolveFilter, type Filter } from '@telecord/producer-core';
 
 import { createTelegramProducer } from '../src/producer';
-import { TelegramEnvSchema } from '../src/env';
+import { TelegramConfigSchema } from '../src/config';
+import { TELEGRAM_FORWARD } from '../src/filter';
 
 /** The account the offline session is logged in as, with the fields the vectors' `IDENTIFY` names. */
 export const SELF: tl.RawUser = {
@@ -40,10 +41,10 @@ export const bindings: VectorBindings = {
 export const vectors = loadVectors(telegramVectors, bindings);
 
 /** The filter a producer starts with when no rules are configured. */
-export const DEFAULT_FILTER: Filter = {
-	rules: TelegramEnvSchema.shape.FILTER_RULES.parse(undefined),
-	fallback: TelegramEnvSchema.shape.FILTER_DEFAULT.parse(undefined),
-};
+export const DEFAULT_FILTER: Filter = resolveFilter(
+	{ filter: TelegramConfigSchema.shape.filter.parse({}), forward: {} },
+	TELEGRAM_FORWARD,
+);
 
 /**
  * Finds a vector by id.

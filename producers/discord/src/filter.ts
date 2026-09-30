@@ -4,6 +4,7 @@ import {
 	DISCORD_FORWARDED_DISPATCHES,
 	type DiscordForwardedDispatch,
 } from '@telecord/ingest-client/discord';
+import type { ForwardPlatform } from '@telecord/producer-core/config';
 
 export const CHAT_TYPES = ['dm', 'group_dm', 'guild'] as const;
 
@@ -27,5 +28,26 @@ export const DISCORD_FILTER_FIELDS = {
 	event: z.enum(DISCORD_FORWARDED_DISPATCHES),
 };
 
-/** DMs and group DMs are dropped unless the rules say otherwise. */
-export const DEFAULT_DISCORD_FILTER_RULES = [{ action: 'deny', type: ['dm', 'group_dm'] }];
+const ForwardNameSchema = z.string().optional();
+
+/**
+ * A server or a channel in `forward.allow` or `forward.deny`, DMs being
+ * channels; `name` is for the reader only.
+ */
+const DiscordForwardEntrySchema = z.union([
+	z.strictObject({ guild: SnowflakeSchema, name: ForwardNameSchema }),
+	z.strictObject({ channel: SnowflakeSchema, name: ForwardNameSchema }),
+]);
+
+export type DiscordForwardEntry = z.output<typeof DiscordForwardEntrySchema>;
+
+/** DMs and group DMs are dropped unless the rules or the `forward` table say otherwise. */
+export const DISCORD_FORWARD: ForwardPlatform<DiscordForwardEntry> = {
+	entry: DiscordForwardEntrySchema,
+	fields: ['channelId', 'guildId'],
+	targetOf: (entry) =>
+		'channel' in entry
+			? { field: 'channelId', id: entry.channel }
+			: { field: 'guildId', id: entry.guild },
+	dms: { type: ['dm', 'group_dm'] },
+};

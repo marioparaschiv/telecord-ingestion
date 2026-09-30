@@ -1,12 +1,4 @@
-import { z } from 'zod';
-
-/** The connection settings every producer reads from its environment. */
-export const IngestEnvShape = {
-	INGEST_URL: z.url({ protocol: /^wss?$/ }),
-	INGEST_API_KEY: z.string().min(1),
-	/** The most events sent and not yet acknowledged. */
-	INGEST_WINDOW: z.coerce.number().int().positive().default(500),
-};
+import type { z } from 'zod';
 
 /**
  * Parses the environment against a producer's schema, failing loudly with every

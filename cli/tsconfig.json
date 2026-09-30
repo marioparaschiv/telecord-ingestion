@@ -1,0 +1,8 @@
+{
+	"extends": "../tsconfig.base.json",
+	"compilerOptions": {
+		"jsx": "react-jsx",
+		"types": ["@total-typescript/ts-reset", "node", "bun"]
+	},
+	"include": ["src", "tests", "scripts", "vitest.config.ts"]
+}

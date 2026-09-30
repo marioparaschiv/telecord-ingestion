@@ -6,6 +6,13 @@
 		"dist"
 	],
 	"type": "module",
+	"exports": {
+		"./config": {
+			"types": "./src/config.ts",
+			"development": "./src/config.ts",
+			"import": "./dist/config.mjs"
+		}
+	},
 	"scripts": {
 		"build": "tsdown",
 		"start": "node ./dist/index.mjs",
