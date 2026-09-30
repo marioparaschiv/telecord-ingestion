@@ -97,6 +97,7 @@ curl -fsSL https://raw.githubusercontent.com/marioparaschiv/telecord-ingestion/m
 
 - Setup's flags go after `sh -s --`. Secrets have no flag: they come from `TELECORD_` variables, so they stay out of the process list.
 - `--yes` never asks. It fails when a required setting is missing, naming it.
+- `--simple` still asks for missing settings and logs in to Telegram, but skips the chat picker. What's forwarded then follows `config.toml`; run `telecord-ingestion filters` later to pick chats.
 - The Telegram login asks for a code, so it waits for you. Run `telecord-ingestion login telegram` in a terminal afterwards.
 - Every setting has a flag and a `TELECORD_` variable. See the [settings reference](#settings-reference).
 
