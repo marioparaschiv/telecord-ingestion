@@ -11,9 +11,12 @@ services:
         <<: *hardening
         profiles: [telegram]
         image: ghcr.io/marioparaschiv/telecord-ingestion-telegram:latest
-        env_file: telegram.env
+        # The owner of config.toml, which telecord-ingestion leaves readable by its owner only.
+        user: ${HOST_UID:-1000}:${HOST_GID:-1000}
         volumes:
             - telegram-data:/data
+            # The updater sets HOST_PROJECT_DIR, since `.` would resolve inside its own container.
+            - ${HOST_PROJECT_DIR:-.}/config.toml:/config/config.toml:ro
         labels:
             telecord-ingestion.autoupdate: 'true'
 
@@ -21,9 +24,10 @@ services:
         <<: *hardening
         profiles: [discord]
         image: ghcr.io/marioparaschiv/telecord-ingestion-discord:latest
-        env_file: discord.env
+        user: ${HOST_UID:-1000}:${HOST_GID:-1000}
         volumes:
             - discord-data:/data
+            - ${HOST_PROJECT_DIR:-.}/config.toml:/config/config.toml:ro
         labels:
             telecord-ingestion.autoupdate: 'true'
 
@@ -32,7 +36,7 @@ services:
         profiles: [updater]
         image: ghcr.io/marioparaschiv/telecord-ingestion-updater:latest
         init: true
-        # Reads the env files, which the installer leaves readable by their owner only.
+        # Reads .env, which telecord-ingestion leaves readable by its owner only.
         cap_add: [DAC_READ_SEARCH]
         environment:
             COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME}

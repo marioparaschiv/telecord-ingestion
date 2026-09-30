@@ -4,6 +4,7 @@ import {
 	TELEGRAM_FORWARDED_UPDATES,
 	type TelegramForwardedUpdate,
 } from '@telecord/ingest-client/telegram';
+import type { ForwardPlatform } from '@telecord/producer-core/config';
 
 export const PEER_TYPES = ['user', 'group', 'channel'] as const;
 
@@ -24,5 +25,18 @@ export const TELEGRAM_FILTER_FIELDS = {
 	update: z.enum(TELEGRAM_FORWARDED_UPDATES),
 };
 
-/** Private chats are dropped unless the rules say otherwise. */
-export const DEFAULT_TELEGRAM_FILTER_RULES = [{ action: 'deny', peerType: 'user' }];
+/** A chat in `forward.allow` or `forward.deny`; `name` is for the reader only. */
+const TelegramForwardEntrySchema = z.strictObject({
+	id: TELEGRAM_FILTER_FIELDS.peerId,
+	name: z.string().optional(),
+});
+
+export type TelegramForwardEntry = z.output<typeof TelegramForwardEntrySchema>;
+
+/** Private chats are dropped unless the rules or the `forward` table say otherwise. */
+export const TELEGRAM_FORWARD: ForwardPlatform<TelegramForwardEntry> = {
+	entry: TelegramForwardEntrySchema,
+	fields: ['peerId'],
+	targetOf: ({ id }) => ({ field: 'peerId', id }),
+	dms: { peerType: ['user'] },
+};

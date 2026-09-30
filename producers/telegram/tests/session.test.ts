@@ -23,8 +23,7 @@ async function open(): Promise<TelegramClient> {
 		apiId: 1,
 		apiHash: 'offline',
 		dataDir,
-		onUnauthorized: vi.fn(),
-		onUpdatesSkipped: vi.fn(),
+		producer: { onUnauthorized: vi.fn(), onUpdatesSkipped: vi.fn() },
 	});
 
 	clients.push(client);
