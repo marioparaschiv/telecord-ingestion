@@ -1,4 +1,3 @@
-import { Client } from 'discord.js-selfbot-v13';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -7,6 +6,7 @@ import { shutdown as shutdownTelemetry } from '@telecord/producer-otel';
 
 import type { DiscordConfig } from './config';
 
+import { createDiscordClient, fetchClientBuild } from './client';
 import { createDiscordProducer } from './producer';
 import { DISCORD_FORWARD } from './filter';
 import { loadSession } from './session';
@@ -24,7 +24,7 @@ async function produce(config: DiscordConfig): Promise<void> {
 	mkdirSync(config.data_dir, { recursive: true });
 
 	const outbox = new Outbox(join(config.data_dir, OUTBOX_FILE));
-	const client = new Client({ session: loadSession(outbox) });
+	const client = createDiscordClient(await fetchClientBuild(), loadSession(outbox));
 
 	const producer = createDiscordProducer({
 		client,

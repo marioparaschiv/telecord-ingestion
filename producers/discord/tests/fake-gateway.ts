@@ -6,6 +6,7 @@ import { AsyncQueue } from '@telecord/producer-core/testing';
 const DISPATCH = 0;
 const HEARTBEAT = 1;
 const IDENTIFY = 2;
+const PRESENCE_UPDATE = 3;
 const RESUME = 6;
 const INVALID_SESSION = 9;
 const HELLO = 10;
@@ -35,6 +36,10 @@ class GatewaySession {
 	id = '';
 	/** Whether the client resumed a session rather than identifying. */
 	resumed = false;
+	/** The `IDENTIFY` payload, when the client identified rather than resumed. */
+	identify: unknown;
+	/** Every presence update the client sent, in order. */
+	readonly presences: unknown[] = [];
 	/** Settles once the client identified, or resumed a session the gateway accepted. */
 	readonly established: Promise<void>;
 	/** Settles with the code the connection closed with. */
@@ -53,7 +58,13 @@ class GatewaySession {
 					case IDENTIFY:
 						this.id = hooks.nextSessionId();
 						this.sequence = 0;
+						this.identify = frame.d;
 						resolve();
+
+						return;
+
+					case PRESENCE_UPDATE:
+						this.presences.push(frame.d);
 
 						return;
 

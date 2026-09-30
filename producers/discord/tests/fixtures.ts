@@ -1,4 +1,4 @@
-import { Client } from 'discord.js-selfbot-v13';
+import type { Client } from 'discord.js-selfbot-v13';
 import { vi, type Mock } from 'vitest';
 import { z } from 'zod';
 
@@ -14,6 +14,7 @@ import type { IngestEnvelope } from '@telecord/ingest-client';
 import { IngestOpcode } from '@telecord/ingest-client';
 
 import { FakeDiscordGateway, type GatewaySession } from './fake-gateway';
+import { createDiscordClient, type ClientBuild } from '../src/client';
 import { createDiscordProducer } from '../src/producer';
 import { DiscordConfigSchema } from '../src/config';
 import { DISCORD_FORWARD } from '../src/filter';
@@ -25,6 +26,13 @@ export const SELF = {
 	discriminator: '0',
 	global_name: 'Ada',
 	avatar: null,
+};
+
+/** The desktop client builds a test client identifies with, as Discord would name them. */
+export const CLIENT_BUILD: ClientBuild = {
+	clientBuildNumber: 441_529,
+	clientVersion: '1.0.9227',
+	nativeBuildNumber: 71_839,
 };
 
 export const bindings: VectorBindings = {
@@ -147,7 +155,7 @@ export async function startDiscord(
 	const gateway = shared ?? (await FakeDiscordGateway.start());
 	const ingest = await FakeIngestServer.start();
 	const outbox = new Outbox(outboxPath);
-	const client = new Client({ session: loadSession(outbox) });
+	const client = createDiscordClient(CLIENT_BUILD, loadSession(outbox));
 	const routes = new Map<string, RestHandler>([
 		['GET /api/v9/gateway', () => ({ url: gateway.url })],
 	]);
