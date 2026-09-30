@@ -24,4 +24,4 @@ catalog:
   zod: ^4.6.5
 
 minimumReleaseAgeExclude:
-  - '@telecord/ingest-client@0.7.0'
+  - '@telecord/ingest-client'

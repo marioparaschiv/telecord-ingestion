@@ -1,0 +1,85 @@
+name: Update ingest-client
+
+on:
+    repository_dispatch:
+        types: [ingest-client-published]
+    schedule:
+        # Fallback in case the dispatch from telecord's release workflow doesn't fire.
+        - cron: '0 6 * * *'
+    workflow_dispatch:
+
+concurrency:
+    group: ${{ github.workflow }}
+    cancel-in-progress: false
+
+permissions:
+    contents: write
+    pull-requests: write
+
+jobs:
+    update:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+
+            - uses: pnpm/action-setup@v6
+
+            - uses: actions/setup-node@v7
+              with:
+                  node-version-file: .node-version
+
+            # The dispatch carries the version because the registry can lag a fresh publish.
+            - name: Bump the catalog
+              id: bump
+              env:
+                  DISPATCHED_VERSION: ${{ github.event.client_payload.version }}
+              run: |
+                  version="${DISPATCHED_VERSION:-$(pnpm view @telecord/ingest-client version)}"
+
+                  if ! echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+                    echo "::error::$version is not a semantic version"
+                    exit 1
+                  fi
+
+                  sed -i -E "s|^(  '@telecord/ingest-client': ).*|\1^$version|" pnpm-workspace.yaml
+                  echo "version=$version" >> "$GITHUB_OUTPUT"
+
+                  if git diff --quiet pnpm-workspace.yaml; then
+                    echo "changed=false" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "changed=true" >> "$GITHUB_OUTPUT"
+                  fi
+
+            - name: Install dependencies
+              if: steps.bump.outputs.changed == 'true'
+              run: pnpm install --no-frozen-lockfile
+
+            # Opened before the checks so a release that breaks the producers stays visible as an open PR.
+            - name: Open pull request
+              id: pr
+              if: steps.bump.outputs.changed == 'true'
+              uses: peter-evans/create-pull-request@v8
+              with:
+                  commit-message: 'build: adopt @telecord/ingest-client ${{ steps.bump.outputs.version }}'
+                  title: 'build: adopt @telecord/ingest-client ${{ steps.bump.outputs.version }}'
+                  body: 'Automated update to [`@telecord/ingest-client@${{ steps.bump.outputs.version }}`](https://www.npmjs.com/package/@telecord/ingest-client/v/${{ steps.bump.outputs.version }}).'
+                  branch: automated/ingest-client
+                  delete-branch: true
+
+            - name: Build
+              if: steps.bump.outputs.changed == 'true'
+              run: pnpm build
+
+            - name: Typecheck
+              if: steps.bump.outputs.changed == 'true'
+              run: pnpm typecheck
+
+            - name: Test
+              if: steps.bump.outputs.changed == 'true'
+              run: pnpm test
+
+            - name: Merge
+              if: steps.pr.outputs.pull-request-number
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: gh pr merge ${{ steps.pr.outputs.pull-request-number }} --squash --delete-branch
