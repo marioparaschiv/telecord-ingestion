@@ -4,9 +4,16 @@ import {
 	toInputChannel,
 	toInputUser,
 } from '@mtcute/node/utils.js';
-import { Long, getMarkedPeerId, tl, type TelegramClient } from '@mtcute/node';
+import { Long, MtTimeoutError, getMarkedPeerId, tl, type TelegramClient } from '@mtcute/node';
+import { open, rm } from 'node:fs/promises';
+import { openAsBlob } from 'node:fs';
+import { join } from 'node:path';
 
 import {
+	TelegramCustomEmojisFetch,
+	TelegramCustomEmojisFetchResult,
+	TelegramForumTopicsFetch,
+	TelegramForumTopicsFetchResult,
 	TelegramMediaFetch,
 	TelegramMediaFetchResult,
 	TelegramMessagesFetch,
@@ -14,6 +21,10 @@ import {
 	TelegramOpcode,
 	TelegramUsersFetch,
 	TelegramUsersFetchResult,
+	type TelegramCustomEmojisFetchPayload,
+	type TelegramCustomEmojisFetchResultPayload,
+	type TelegramForumTopicsFetchPayload,
+	type TelegramForumTopicsFetchResultPayload,
 	type TelegramMediaFetchPayload,
 	type TelegramMediaFetchResultPayload,
 	type TelegramMessagesFetchPayload,
@@ -29,15 +40,16 @@ import {
 	failureMessage,
 	isAllowed,
 	postPresigned,
-	readLimited,
 	type Filter,
+	type ProgressReporter,
 	type RequestHandler,
 } from '@telecord/producer-core';
 import { recordError, withSpan } from '@telecord/producer-otel';
 import { RequestFailureReason } from '@telecord/ingest-client';
 
 import { decodeFileLocation, serialize, serializeVector, type FileLocation } from './tl';
-import { subjectOfMarkedId } from './peers';
+import { resolveInputPeer, subjectOfMarkedId } from './peers';
+import { forumTopicPages } from './snapshot';
 
 /** Errors meaning this session can no longer read the chat. */
 const ACCESS_ERRORS = new Set<string>([
@@ -56,9 +68,22 @@ const MESSAGES_FETCH_FLOOD_SLEEP = 9 * 60_000;
 
 /**
  * mtcute retries a failing `upload.getFile` forever, so a file Telegram keeps answering with
- * `-503 Timeout` would download for good. The server gives up on `MEDIA_FETCH` after 2 minutes.
+ * `-503 Timeout` would download for good. A stalled download is resumed from where it stopped.
  */
-const DOWNLOAD_STALL_TIMEOUT = 60_000;
+const DOWNLOAD_STALL_TIMEOUT = 40_000;
+
+/**
+ * Stalls in a row a download resumes from before it gives up. The server fails a `MEDIA_FETCH` two
+ * minutes after its last progress, sent at most `PROGRESS_INTERVAL` before a stall begins, so the
+ * last stall still ends in an answer the server is waiting for.
+ */
+const DOWNLOAD_STALL_RETRIES = 1;
+
+/** How often a download that is receiving bytes reports its progress. */
+const PROGRESS_INTERVAL = 15_000;
+
+/** The most topic pages one `FORUM_TOPICS_FETCH_RESULT` carries. */
+const FORUM_TOPICS_MAX_PAGES = 1_000;
 
 const logger = createTaggedLogger('Telegram Requests');
 
@@ -73,6 +98,13 @@ function isAccessError(error: unknown): boolean {
 function isFileReferenceError(error: unknown): boolean {
 	return tl.RpcError.is(error) && FILE_REFERENCE_ERRORS.has(error.text);
 }
+
+/** Where a download is written and how its progress is reported. */
+type DownloadSink = {
+	/** The file the bytes are written to, replaced on every attempt. */
+	path: string;
+	progress: ProgressReporter;
+};
 
 async function isChatAllowed(
 	client: TelegramClient,
@@ -122,8 +154,8 @@ async function readMessages(
 
 /**
  * Answers one `MESSAGES_FETCH` with the boxed `messages.Messages` Telegram
- * returned. A blocked chat is declined before anything else, and the peer is
- * resolved from the session's own cache, so neither calls Telegram.
+ * returned. A blocked chat is declined before anything calls Telegram, and a
+ * peer the session's cache lacks is resolved through Telegram.
  */
 async function fetchMessages(
 	client: TelegramClient,
@@ -136,17 +168,17 @@ async function fetchMessages(
 		return { ok: false, reason: RequestFailureReason.FILTERED };
 	}
 
-	const peer = await client.storage.peers.getById(markedId);
-
-	if (!peer) {
-		return {
-			ok: false,
-			reason: RequestFailureReason.ACCESS_LOST,
-			message: `Chat ${request.peerId} is unknown to this session`,
-		};
-	}
-
 	try {
+		const peer = await resolveInputPeer(client, markedId);
+
+		if (!peer) {
+			return {
+				ok: false,
+				reason: RequestFailureReason.ACCESS_LOST,
+				message: `Chat ${request.peerId} cannot be resolved by this session`,
+			};
+		}
+
 		return { ok: true, messages: serialize(await readMessages(client, peer, request)) };
 	} catch (error) {
 		logger.warn(`Failed to fetch messages in ${request.peerId}: ${asError(error).message}`);
@@ -171,18 +203,103 @@ async function fetchUsers(
 	client: TelegramClient,
 	{ userId }: TelegramUsersFetchPayload,
 ): Promise<TelegramUsersFetchResultPayload> {
-	const peer = await client.storage.peers.getById(userId);
-
-	if (!peer || !isInputPeerUser(peer)) {
-		return { ok: false, reason: RequestFailureReason.ACCESS_LOST };
-	}
-
 	try {
+		const peer = await resolveInputPeer(client, userId);
+
+		if (!peer || !isInputPeerUser(peer)) {
+			return { ok: false, reason: RequestFailureReason.ACCESS_LOST };
+		}
+
 		const users = await client.call({ _: 'users.getUsers', id: [toInputUser(peer)] });
 
 		return { ok: true, users: serializeVector(users) };
 	} catch (error) {
 		logger.warn(`Failed to fetch user ${userId}: ${asError(error).message}`);
+		recordError(error);
+
+		return isAccessError(error)
+			? {
+					ok: false,
+					reason: RequestFailureReason.ACCESS_LOST,
+					message: failureMessage(error),
+				}
+			: { ok: false, message: failureMessage(error) };
+	}
+}
+
+/** The documents behind custom emoji, as `messages.getCustomEmojiDocuments` returns them. */
+function customEmojiDocuments(
+	client: TelegramClient,
+	documentIds: string[],
+): Promise<tl.TypeDocument[]> {
+	return client.call({
+		_: 'messages.getCustomEmojiDocuments',
+		documentId: documentIds.map((documentId) => Long.fromString(documentId)),
+	});
+}
+
+/**
+ * Answers one `CUSTOM_EMOJIS_FETCH` with the boxed `Vector<Document>` Telegram
+ * returned. An emoji document is no chat, so no filter applies.
+ */
+async function fetchCustomEmojis(
+	client: TelegramClient,
+	{ documentIds }: TelegramCustomEmojisFetchPayload,
+): Promise<TelegramCustomEmojisFetchResultPayload> {
+	try {
+		return {
+			ok: true,
+			documents: serializeVector(await customEmojiDocuments(client, documentIds)),
+		};
+	} catch (error) {
+		logger.warn(
+			`Failed to fetch ${documentIds.length} custom emoji: ${asError(error).message}`,
+		);
+		recordError(error);
+
+		return { ok: false, message: failureMessage(error) };
+	}
+}
+
+/**
+ * Answers one `FORUM_TOPICS_FETCH` with every `messages.forumTopics` page of the
+ * forum, paged as a chat snapshot pages them. A blocked forum is declined before
+ * anything calls Telegram.
+ */
+async function fetchForumTopics(
+	client: TelegramClient,
+	filter: Filter,
+	{ peerId }: TelegramForumTopicsFetchPayload,
+): Promise<TelegramForumTopicsFetchResultPayload> {
+	const markedId = Number(peerId);
+
+	if (!(await isChatAllowed(client, filter, markedId))) {
+		return { ok: false, reason: RequestFailureReason.FILTERED };
+	}
+
+	try {
+		const peer = await resolveInputPeer(client, markedId);
+
+		if (!peer) {
+			return {
+				ok: false,
+				reason: RequestFailureReason.ACCESS_LOST,
+				message: `Forum ${peerId} cannot be resolved by this session`,
+			};
+		}
+
+		const pages = await forumTopicPages(client, peer);
+
+		if (pages.length > FORUM_TOPICS_MAX_PAGES) {
+			return {
+				ok: false,
+				message: `Forum ${peerId} has more than ${FORUM_TOPICS_MAX_PAGES} topic pages`,
+			};
+		}
+
+		return { ok: true, topics: pages.map((page) => serialize(page)) };
+	} catch (error) {
+		logger.warn(`Failed to fetch the topics of forum ${peerId}: ${asError(error).message}`);
 		recordError(error);
 
 		return isAccessError(error)
@@ -230,10 +347,7 @@ async function locate(
 		return { location, dcId: locator.dcId };
 	}
 
-	const [document] = await client.call({
-		_: 'messages.getCustomEmojiDocuments',
-		documentId: [Long.fromString(locator.documentId)],
-	});
+	const [document] = await customEmojiDocuments(client, [locator.documentId]);
 
 	if (document?._ !== 'document') {
 		return { ok: false, reason: RequestFailureReason.SOURCE_DELETED };
@@ -297,7 +411,7 @@ async function refreshReference(
 		return { ok: false, reason: RequestFailureReason.EXPIRED };
 	}
 
-	const peer = await client.storage.peers.getById(Number(source.peerId));
+	const peer = await resolveInputPeer(client, Number(source.peerId));
 
 	if (!peer) {
 		return { ok: false, reason: RequestFailureReason.SOURCE_CONTEXT_LOST };
@@ -327,15 +441,61 @@ async function refreshReference(
 	return { location: { ...location, fileReference: file.fileReference }, dcId };
 }
 
-function download(
+/**
+ * Streams the file to disk, so memory does not grow with its size. A stall is resumed from the
+ * offset reached, and progress is reported while bytes arrive, never while stalled.
+ *
+ * @returns How many bytes were written, or undefined once the file grows past `maxBytes`.
+ */
+async function download(
 	client: TelegramClient,
 	{ location, dcId }: DownloadTarget,
 	maxBytes: number,
-): Promise<Uint8Array<ArrayBuffer> | undefined> {
-	return readLimited(
-		client.downloadAsIterable(location, { dcId, stallTimeout: DOWNLOAD_STALL_TIMEOUT }),
-		maxBytes,
-	);
+	{ path, progress }: DownloadSink,
+): Promise<number | undefined> {
+	const file = await open(path, 'w');
+	let offset = 0;
+	let stalls = 0;
+	let reportedAt = Date.now();
+
+	try {
+		for (;;) {
+			try {
+				const chunks = client.downloadAsIterable(location, {
+					dcId,
+					offset,
+					stallTimeout: DOWNLOAD_STALL_TIMEOUT,
+				});
+
+				for await (const chunk of chunks) {
+					offset += chunk.byteLength;
+
+					if (offset > maxBytes) {
+						return undefined;
+					}
+
+					await file.write(chunk);
+					stalls = 0;
+
+					if (Date.now() - reportedAt >= PROGRESS_INTERVAL) {
+						progress(offset);
+						reportedAt = Date.now();
+					}
+				}
+
+				return offset;
+			} catch (error) {
+				if (!(error instanceof MtTimeoutError) || stalls >= DOWNLOAD_STALL_RETRIES) {
+					throw error;
+				}
+
+				stalls += 1;
+				logger.warn(`Download stalled at ${offset} bytes, resuming from there`);
+			}
+		}
+	} finally {
+		await file.close();
+	}
 }
 
 /**
@@ -346,9 +506,10 @@ async function downloadRefreshing(
 	client: TelegramClient,
 	target: DownloadTarget,
 	{ source, maxBytes }: TelegramMediaFetchPayload,
-): Promise<Uint8Array<ArrayBuffer> | undefined | TelegramMediaFetchResultPayload> {
+	sink: DownloadSink,
+): Promise<number | undefined | TelegramMediaFetchResultPayload> {
 	try {
-		return await download(client, target, maxBytes);
+		return await download(client, target, maxBytes, sink);
 	} catch (error) {
 		if (!isFileReferenceError(error)) {
 			throw error;
@@ -360,7 +521,7 @@ async function downloadRefreshing(
 
 		const refreshed = await refreshReference(client, target, source);
 
-		return 'location' in refreshed ? download(client, refreshed, maxBytes) : refreshed;
+		return 'location' in refreshed ? download(client, refreshed, maxBytes, sink) : refreshed;
 	}
 }
 
@@ -371,7 +532,7 @@ function mediaSourceOf({ source }: TelegramMediaFetchPayload): string {
 }
 
 /**
- * Answers one `MEDIA_FETCH`: downloads the file from the session and posts it
+ * Answers one `MEDIA_FETCH`: downloads the file from the session to disk and posts it
  * to the presigned upload. The source chat is checked against the filter
  * rules, and the locator against the three allowed locations, before Telegram
  * is called.
@@ -379,7 +540,9 @@ function mediaSourceOf({ source }: TelegramMediaFetchPayload): string {
 async function fetchMedia(
 	client: TelegramClient,
 	filter: Filter,
+	downloadDir: string,
 	request: TelegramMediaFetchPayload,
+	progress: ProgressReporter,
 ): Promise<TelegramMediaFetchResultPayload> {
 	const { locator, source, maxBytes, upload } = request;
 
@@ -390,6 +553,8 @@ async function fetchMedia(
 		return { ok: false, reason: RequestFailureReason.FILTERED };
 	}
 
+	const path = join(downloadDir, `${crypto.randomUUID()}.part`);
+
 	try {
 		const target = await locate(client, filter, locator);
 
@@ -397,20 +562,20 @@ async function fetchMedia(
 			return target;
 		}
 
-		const bytes = await downloadRefreshing(client, target, request);
+		const bytes = await downloadRefreshing(client, target, request, { path, progress });
 
 		if (bytes === undefined) {
 			return { ok: false, message: `The file is larger than ${maxBytes} bytes` };
 		}
 
-		if (!(bytes instanceof Uint8Array)) {
+		if (typeof bytes !== 'number') {
 			return bytes;
 		}
 
-		const status = await postPresigned(upload, bytes);
+		const status = await postPresigned(upload, await openAsBlob(path));
 
 		return status >= 200 && status < 300
-			? { ok: true, bytes: bytes.byteLength }
+			? { ok: true, bytes }
 			: { ok: false, message: `The upload was answered with HTTP ${status}` };
 	} catch (error) {
 		logger.warn(
@@ -425,21 +590,26 @@ async function fetchMedia(
 					message: failureMessage(error),
 				}
 			: { ok: false, message: failureMessage(error) };
+	} finally {
+		await rm(path, { force: true });
 	}
 }
 
 /**
  * The single-result requests a Telegram producer answers: `PROBE`,
- * `MESSAGES_FETCH`, `MEDIA_FETCH` and `USERS_FETCH`, each chat-scoped one
- * checked against the filter rules.
+ * `MESSAGES_FETCH`, `MEDIA_FETCH` and `USERS_FETCH`, and the optional
+ * `CUSTOM_EMOJIS_FETCH` and `FORUM_TOPICS_FETCH` it declares, each chat-scoped
+ * one checked against the filter rules.
  *
  * @param client - The logged-in session.
  * @param filter - The producer's filter rules.
+ * @param downloadDir - Where `MEDIA_FETCH` writes a file while it downloads.
  * @returns The handlers, keyed by request opcode.
  */
 export function createTelegramRequests(
 	client: TelegramClient,
 	filter: Filter,
+	downloadDir: string,
 ): Record<string, RequestHandler> {
 	return {
 		[TelegramOpcode.PROBE]: defineProbe(TelegramOpcode.PROBE_RESULT),
@@ -463,7 +633,7 @@ export function createTelegramRequests(
 			payload: TelegramMediaFetch,
 			result: TelegramOpcode.MEDIA_FETCH_RESULT,
 			resultSchema: TelegramMediaFetchResult,
-			handle: (request) =>
+			handle: (request, progress) =>
 				withSpan(
 					'telegram.media_fetch',
 					{
@@ -476,7 +646,7 @@ export function createTelegramRequests(
 							'telegram.message.id': request.source.messageId,
 						}),
 					},
-					() => fetchMedia(client, filter, request),
+					() => fetchMedia(client, filter, downloadDir, request, progress),
 				),
 		}),
 		[TelegramOpcode.USERS_FETCH]: defineRequest({
@@ -492,6 +662,36 @@ export function createTelegramRequests(
 						'telegram.user.id': request.userId,
 					},
 					() => fetchUsers(client, request),
+				),
+		}),
+		[TelegramOpcode.CUSTOM_EMOJIS_FETCH]: defineRequest({
+			payload: TelegramCustomEmojisFetch,
+			result: TelegramOpcode.CUSTOM_EMOJIS_FETCH_RESULT,
+			resultSchema: TelegramCustomEmojisFetchResult,
+			handle: (request) =>
+				withSpan(
+					'telegram.custom_emojis_fetch',
+					{
+						'telecord.platform': 'telegram',
+						'telecord.request': 'CUSTOM_EMOJIS_FETCH',
+						'telegram.document.count': request.documentIds.length,
+					},
+					() => fetchCustomEmojis(client, request),
+				),
+		}),
+		[TelegramOpcode.FORUM_TOPICS_FETCH]: defineRequest({
+			payload: TelegramForumTopicsFetch,
+			result: TelegramOpcode.FORUM_TOPICS_FETCH_RESULT,
+			resultSchema: TelegramForumTopicsFetchResult,
+			handle: (request) =>
+				withSpan(
+					'telegram.forum_topics_fetch',
+					{
+						'telecord.platform': 'telegram',
+						'telecord.request': 'FORUM_TOPICS_FETCH',
+						'telegram.chat.id': request.peerId,
+					},
+					() => fetchForumTopics(client, filter, request),
 				),
 		}),
 	};

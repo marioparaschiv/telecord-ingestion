@@ -1,9 +1,18 @@
+import {
+	Long,
+	MtPeerNotFoundError,
+	PeersIndex,
+	RawUpdateInfo,
+	tl,
+	type TelegramClient,
+} from '@mtcute/node';
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
-import { Long, PeersIndex, RawUpdateInfo, type TelegramClient } from '@mtcute/node';
 import { z } from 'zod';
 
 import {
 	TelegramChatsPart,
+	TelegramCustomEmojisFetchResult,
+	TelegramForumTopicsFetchResult,
 	TelegramMediaFetchResult,
 	TelegramMessagesFetchResult,
 	TelegramOpcode,
@@ -25,9 +34,11 @@ import {
 	DEFAULT_FILTER,
 	bindings,
 	bytesOf,
+	createDownloadDir,
 	createOfflineClient,
 	decodeObject,
 	decodeVector,
+	failChannelFetch,
 	vectorChats,
 	dialogOf,
 	iterate,
@@ -53,6 +64,8 @@ const RESULT_SCHEMAS = new Map<string, z.ZodType>([
 	[TelegramOpcode.MEDIA_FETCH_RESULT, TelegramMediaFetchResult],
 	[TelegramOpcode.CHATS_FETCH_RESULT, TelegramChatsPart],
 	[TelegramOpcode.USERS_FETCH_RESULT, TelegramUsersFetchResult],
+	[TelegramOpcode.CUSTOM_EMOJIS_FETCH_RESULT, TelegramCustomEmojisFetchResult],
+	[TelegramOpcode.FORUM_TOPICS_FETCH_RESULT, TelegramForumTopicsFetchResult],
 ]);
 
 const connects = vectors.vectors.filter(
@@ -72,8 +85,13 @@ let outbox: Outbox;
 const onFatal = vi.fn<(reason: string) => void>();
 
 function start(filter: Filter = DEFAULT_FILTER): void {
+	const downloads = createDownloadDir();
+
 	outbox = new Outbox(':memory:');
-	onTestFinished(() => outbox.close());
+	onTestFinished(() => {
+		outbox.close();
+		downloads.remove();
+	});
 	producer = createTelegramProducer({
 		client,
 		filter,
@@ -81,6 +99,7 @@ function start(filter: Filter = DEFAULT_FILTER): void {
 		apiKey: bindings.key,
 		outbox,
 		window: 500,
+		downloadDir: downloads.path,
 		onFatal,
 	});
 	producer.updates.start();
@@ -230,6 +249,7 @@ describe('identify', () => {
 			op: vectors.identify.op,
 			d: {
 				...z.looseObject({}).parse(vectors.identify.d),
+				requests: ['CUSTOM_EMOJIS_FETCH', 'FORUM_TOPICS_FETCH'],
 				streamId: outbox.streamId,
 				recovered: true,
 			},
@@ -277,6 +297,54 @@ describe('event vectors', () => {
 		expect(frame.seq).toBe(1);
 	});
 
+	it.each([
+		['Telegram answers CHANNEL_PRIVATE', new tl.RpcError(400, 'CHANNEL_PRIVATE')],
+		['the session can no longer resolve the channel', 'unresolvable'],
+	] as const)(
+		'forwards the event/update-access-lost container byte for byte once %s',
+		async (_cause, failure) => {
+			const expected = vector('event/update-access-lost');
+
+			if (expected.kind !== 'event') {
+				throw new Error('event/update-access-lost is not an event vector');
+			}
+
+			const sent = narrow(
+				decodeObject(z.object({ data: z.unknown() }).parse(expected.send.d).data),
+				'updates',
+			);
+			const [update] = sent.updates;
+			const [channel] = vectorUpdates().chats;
+
+			if (!update || channel?._ !== 'channel') {
+				throw new Error(
+					'event/update-access-lost lost its update, or event/update its channel',
+				);
+			}
+
+			// A session that only ever saw the channel min, so shipping the update means fetching it.
+			await client.destroy();
+			client = await createOfflineClient();
+			vi.useFakeTimers({ toFake: ['Date'] });
+			vi.setSystemTime(sent.date * 1000);
+			start();
+
+			const socket = await greeted();
+
+			failChannelFetch(client, channel, failure);
+			producer.updates.onRawUpdate(
+				new RawUpdateInfo(update, PeersIndex.from({ chats: [{ ...channel, min: true }] })),
+			);
+
+			const frame = await socket.nextFrame();
+
+			expect({ op: frame.op, d: frame.d }).toEqual({
+				op: expected.send.op,
+				d: expected.send.d,
+			});
+		},
+	);
+
 	it.each(events.map((event) => [event.id, event] as const))(
 		'%s: keeps the event until an ACK covers it',
 		async (_id, { expect: answer }) => {
@@ -314,6 +382,17 @@ describe('request vectors', () => {
 			.spyOn(globalThis, 'fetch')
 			.mockRejectedValue(new Error('No upload expected'));
 		const [first] = reply;
+
+		// Resolved from the session's cache alone, which the vectors' peers are seeded into.
+		vi.spyOn(client, 'resolvePeer').mockImplementation(async (peerId) => {
+			const peer = await client.storage.peers.getById(Number(peerId));
+
+			if (!peer) {
+				throw new MtPeerNotFoundError(`Peer ${String(peerId)} is not found in local cache`);
+			}
+
+			return peer;
+		});
 
 		switch (id) {
 			case 'request/chats-fetch': {
@@ -399,6 +478,55 @@ describe('request vectors', () => {
 				return DEFAULT_FILTER;
 			}
 
+			case 'request/media-fetch-progress': {
+				// Each part lands a progress interval after the last, but the final one, which only
+				// the result reports.
+				const parts: [bytes: number, after: number][] = [
+					[1_048_576, 15_000],
+					[19_922_944, 15_000],
+					[2_097_152, 0],
+				];
+
+				vi.useFakeTimers({ toFake: ['Date'] });
+				onTestFinished(() => {
+					vi.useRealTimers();
+				});
+				download.mockImplementation(async function* () {
+					for (const [bytes, after] of parts) {
+						vi.setSystemTime(Date.now() + after);
+
+						yield new Uint8Array(bytes);
+					}
+				});
+				upload.mockResolvedValue(new Response(null, { status: 204 }));
+
+				return DEFAULT_FILTER;
+			}
+
+			case 'request/custom-emojis-fetch': {
+				const documents = decodeVector(field(first, 'documents'));
+
+				call.mockImplementation(async (request) => {
+					expect(request._).toBe('messages.getCustomEmojiDocuments');
+
+					return documents;
+				});
+
+				return DEFAULT_FILTER;
+			}
+
+			case 'request/forum-topics-fetch': {
+				const [page] = z.array(z.instanceof(Uint8Array)).parse(field(first, 'topics'));
+
+				call.mockImplementation(async (request) => {
+					expect(request._).toBe('messages.getForumTopics');
+
+					return narrow(decodeObject(page), 'messages.forumTopics');
+				});
+
+				return DEFAULT_FILTER;
+			}
+
 			case 'request/users-fetch': {
 				const users = decodeVector(field(first, 'users')).map((user) =>
 					narrow(user, 'user'),
@@ -416,6 +544,7 @@ describe('request vectors', () => {
 
 			case 'request/messages-fetch-filtered':
 			case 'request/media-fetch-filtered':
+			case 'request/forum-topics-fetch-filtered':
 				return DENY_CHANNEL;
 
 			default:
@@ -503,5 +632,62 @@ describe('snapshot', () => {
 			[{ peerId: `-100${forum.id}`, messageId: 11 }],
 			[{ peerId: `-${group.id}`, messageId: 12 }],
 		]);
+	});
+
+	it('keeps a chat the dialog walk missed while Telegram still shows the account in it', async () => {
+		const { group } = vectorChats();
+		const busy: tl.RawChannel = {
+			_: 'channel',
+			id: 1_444_555_666,
+			accessHash: Long.fromNumber(31),
+			title: 'Busy Channel',
+			photo: { _: 'chatPhotoEmpty' },
+			date: 1_758_000_000,
+			broadcast: true,
+		};
+		const friend: tl.RawUser = { _: 'user', id: 555_000_111, firstName: 'Friend' };
+		const walks = [
+			[
+				dialogOf({ _: 'peerChat', chatId: group.id }, [group]),
+				dialogOf({ _: 'peerChannel', channelId: busy.id }, [busy]),
+				dialogOf({ _: 'peerUser', userId: friend.id }, [], [friend]),
+			],
+			[dialogOf({ _: 'peerChat', chatId: group.id }, [group])],
+			[dialogOf({ _: 'peerChat', chatId: group.id }, [group])],
+		];
+		const lookups = [busy, { ...busy, left: true }];
+
+		await seedPeers(client, { chats: [busy] });
+		vi.spyOn(client, 'iterDialogs').mockImplementation(() => iterate(walks.shift() ?? []));
+
+		const call = vi.spyOn(client, 'call').mockImplementation(async (method) => {
+			if (method._ !== 'channels.getChannels') {
+				throw new Error(`Unexpected call ${method._}`);
+			}
+
+			return { _: 'messages.chats', chats: [lookups.shift() ?? busy] };
+		});
+
+		start({ rules: [], fallback: 'allow' });
+
+		const socket = await greeted();
+
+		async function snapshotChatIds(nonce: string): Promise<number[]> {
+			socket.send(TelegramOpcode.CHATS_FETCH, {}, nonce);
+
+			const { chats = new Uint8Array() } = TelegramChatsPart.parse(
+				(await socket.nextFrame()).d,
+			);
+
+			return decodeVector(chats).map(
+				(chat) => narrow(chat, chat._ === 'chat' ? 'chat' : 'channel').id,
+			);
+		}
+
+		expect(await snapshotChatIds('first')).toEqual([group.id, busy.id]);
+		expect(await snapshotChatIds('missed')).toEqual([group.id, busy.id]);
+		expect(await snapshotChatIds('left')).toEqual([group.id]);
+		// The private chat was never re-checked: the server does not revoke one.
+		expect(call).toHaveBeenCalledTimes(2);
 	});
 });

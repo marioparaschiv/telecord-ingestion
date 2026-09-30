@@ -690,14 +690,16 @@ Nothing else your account receives is sent. A denied chat is left out entirely.
 
 These are the only requests. Each one about a chat is checked against your filters first; a request for a denied chat is declined without calling Telegram or Discord.
 
-| Request              | Telegram | Discord | What it does                                                   |
-| -------------------- | -------- | ------- | -------------------------------------------------------------- |
-| `CHATS_FETCH`        | yes      | yes     | Lists your shared chats. Sent on connect and every 30 minutes. |
-| `MESSAGES_FETCH`     | yes      | yes     | Reads up to 100 messages from one chat.                        |
-| `MEDIA_FETCH`        | yes      | yes     | Downloads one file and uploads it to the server.               |
-| `ATTACHMENT_REFRESH` | no       | yes     | Renews one expired Discord attachment link.                    |
-| `USERS_FETCH`        | yes      | no      | Reads the profile of one user your account already knows.      |
-| `PROBE`              | yes      | yes     | Checks the producer is connected and responding.               |
+| Request               | Telegram | Discord | What it does                                                   |
+| --------------------- | -------- | ------- | -------------------------------------------------------------- |
+| `CHATS_FETCH`         | yes      | yes     | Lists your shared chats. Sent on connect and every 30 minutes. |
+| `MESSAGES_FETCH`      | yes      | yes     | Reads up to 100 messages from one chat.                        |
+| `MEDIA_FETCH`         | yes      | yes     | Downloads one file and uploads it to the server.               |
+| `ATTACHMENT_REFRESH`  | no       | yes     | Renews one expired Discord attachment link.                    |
+| `USERS_FETCH`         | yes      | no      | Reads the profile of one user your account already knows.      |
+| `CUSTOM_EMOJIS_FETCH` | yes      | no      | Reads which file format a custom emoji reaction is.            |
+| `FORUM_TOPICS_FETCH`  | yes      | no      | Lists the topics of one forum a new message opened.            |
+| `PROBE`               | yes      | yes     | Checks the producer is connected and responding.               |
 
 `MEDIA_FETCH` is limited: Telegram accepts only documents, photos and chat photos, and Discord downloads only from Discord's CDN.
 
