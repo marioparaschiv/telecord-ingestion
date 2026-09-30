@@ -46,6 +46,7 @@ type SetupOptions = {
 	checkInterval?: string;
 	updateDelay?: string;
 	yes?: boolean;
+	simple?: boolean;
 	[flag: string]: unknown;
 };
 
@@ -140,7 +141,8 @@ const setup = new Command('setup')
 			'How long a release waits before it is installed',
 		).env('TELECORD_UPDATE_DELAY'),
 	)
-	.option('-y, --yes', 'Never prompt: fail when a required setting is missing');
+	.option('-y, --yes', 'Never prompt: fail when a required setting is missing')
+	.option('--simple', 'Skip the chat picker and forward what config.toml allows');
 
 for (const { option } of settingOptions) {
 	setup.addOption(option);
@@ -262,7 +264,7 @@ setup.action(async (options: SetupOptions) => {
 
 	console.log(`Telecord ingestion is running in ${install.dir}`);
 
-	if (!interactive) {
+	if (!interactive || options.simple) {
 		return;
 	}
 
