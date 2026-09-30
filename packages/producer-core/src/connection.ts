@@ -1,3 +1,4 @@
+import { metrics } from '@opentelemetry/api';
 import { WebSocket } from 'ws';
 
 import {
@@ -91,6 +92,12 @@ function isFatalClose(code: number, reason: string): boolean {
  */
 class IngestConnection {
 	private logger = createTaggedLogger('Ingest Connection');
+	// The metrics API has no proxy for a provider registered later, so the meter
+	// is resolved per connection, after telemetry setup has run.
+	private meter = metrics.getMeter('@telecord/producer-core');
+	private reconnects = this.meter.createCounter('producer.connection.reconnects', {
+		description: 'Reconnects scheduled after the connection to the server dropped',
+	});
 	private socket: WebSocket | undefined;
 	/** Whether the current socket received `READY`; events wait until it has. */
 	private ready = false;
@@ -107,7 +114,21 @@ class IngestConnection {
 	private silenceTimer: NodeJS.Timeout | undefined;
 	private reconnectTimer: NodeJS.Timeout | undefined;
 
-	constructor(private options: ConnectionOptions) {}
+	constructor(private options: ConnectionOptions) {
+		this.meter
+			.createObservableGauge('producer.connection.connected', {
+				description:
+					'Whether the server has answered IDENTIFY and events are streaming (0 or 1)',
+			})
+			.addCallback((observer) => observer.observe(this.ready ? 1 : 0));
+		this.meter
+			.createObservableGauge('producer.events.in_flight', {
+				description: 'Events sent on the current stream and not yet acknowledged',
+			})
+			.addCallback((observer) =>
+				observer.observe(this.ready ? this.sent - this.acknowledged : 0),
+			);
+	}
 
 	start(): void {
 		this.stopped = false;
@@ -513,6 +534,10 @@ class IngestConnection {
 		const delay = Math.min(MIN_RECONNECT_DELAY * 2 ** this.attempt, MAX_RECONNECT_DELAY);
 
 		this.attempt++;
+		this.reconnects.add(1, {
+			'close.code': code,
+			...(refusedStatus !== undefined && { 'http.response.status_code': refusedStatus }),
+		});
 		this.logger.warn(
 			`Disconnected (${description}), reconnecting in ${delay}ms with ${this.options.outbox.size} events unacknowledged`,
 		);

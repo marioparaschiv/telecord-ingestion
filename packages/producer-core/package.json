@@ -23,12 +23,14 @@
 		"typecheck": "tsc --noEmit"
 	},
 	"dependencies": {
+		"@opentelemetry/api": "catalog:",
 		"@telecord/ingest-client": "catalog:",
 		"evlog": "catalog:",
 		"ws": "catalog:",
 		"zod": "catalog:"
 	},
 	"devDependencies": {
+		"@opentelemetry/sdk-metrics": "catalog:",
 		"@total-typescript/ts-reset": "catalog:",
 		"@types/node": "catalog:",
 		"@types/ws": "catalog:",

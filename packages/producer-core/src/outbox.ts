@@ -1,3 +1,4 @@
+import { metrics, type BatchObservableCallback } from '@opentelemetry/api';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 
@@ -8,10 +9,16 @@ const STREAM_ID_KEY = 'stream_id';
 
 const SCHEMA = `
 	CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
-	CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, frame BLOB NOT NULL) STRICT;
-	CREATE TABLE IF NOT EXISTS captures (id INTEGER PRIMARY KEY AUTOINCREMENT, data BLOB NOT NULL) STRICT;
+	CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, frame BLOB NOT NULL, stored_at INTEGER) STRICT;
+	CREATE TABLE IF NOT EXISTS captures (id INTEGER PRIMARY KEY AUTOINCREMENT, data BLOB NOT NULL, captured_at INTEGER) STRICT;
 	CREATE TABLE IF NOT EXISTS session_log (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT UNIQUE, data TEXT NOT NULL) STRICT;
 `;
+
+/** Timestamp columns a file created before them lacks, added when it is opened. */
+const TIMESTAMP_COLUMNS = [
+	['events', 'stored_at'],
+	['captures', 'captured_at'],
+] as const;
 
 export type OutboxEvent = { seq: number; frame: Uint8Array };
 
@@ -28,6 +35,25 @@ export type OutboxCapture = { id: number; data: Uint8Array };
  * losing or duplicating the event.
  */
 class Outbox {
+	// The metrics API has no proxy for a provider registered later, so the meter
+	// is resolved per outbox, after telemetry setup has run.
+	private meter = metrics.getMeter('@telecord/producer-core');
+	private ackDuration = this.meter.createHistogram('producer.event.ack.duration', {
+		description: 'Time from an event being captured until the server acknowledged it',
+		unit: 's',
+	});
+	private capturesGauge = this.meter.createObservableGauge('producer.outbox.captures', {
+		description: 'Captures stored and not yet turned into events',
+	});
+	private eventsGauge = this.meter.createObservableGauge('producer.outbox.events', {
+		description: 'Events stored and not yet acknowledged by the server',
+	});
+	private observeDepth: BatchObservableCallback = (observer) => {
+		const captures = this.db.prepare('SELECT count(*) AS size FROM captures').get()?.size;
+
+		observer.observe(this.capturesGauge, Number(captures));
+		observer.observe(this.eventsGauge, this.size);
+	};
 	private db: DatabaseSync;
 	readonly streamId: string;
 
@@ -36,11 +62,20 @@ class Outbox {
 		this.db = new DatabaseSync(path);
 		this.db.exec('PRAGMA journal_mode = WAL');
 		this.db.exec(SCHEMA);
+
+		for (const [table, column] of TIMESTAMP_COLUMNS) {
+			this.addColumn(table, column);
+		}
+
 		this.db
 			.prepare('INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)')
 			.run(STREAM_ID_KEY, randomUUID());
 
 		this.streamId = String(this.getMeta(STREAM_ID_KEY));
+		this.meter.addBatchObservableCallback(this.observeDepth, [
+			this.capturesGauge,
+			this.eventsGauge,
+		]);
 	}
 
 	/** How many events wait for their `ACK`. */
@@ -55,8 +90,8 @@ class Outbox {
 	 */
 	capture(data: Uint8Array): number {
 		const { lastInsertRowid } = this.db
-			.prepare('INSERT INTO captures (data) VALUES (?)')
-			.run(data);
+			.prepare('INSERT INTO captures (data, captured_at) VALUES (?, ?)')
+			.run(data, Date.now());
 
 		return Number(lastInsertRowid);
 	}
@@ -83,7 +118,10 @@ class Outbox {
 	 */
 	append(encode: (seq: number) => Uint8Array | undefined, capture?: number): number | undefined {
 		return this.transaction(() => {
+			let storedAt: number | null = Date.now();
+
 			if (capture !== undefined) {
+				storedAt = this.capturedAt(capture);
 				this.release(capture);
 			}
 
@@ -94,7 +132,9 @@ class Outbox {
 				return undefined;
 			}
 
-			this.db.prepare('INSERT INTO events (seq, frame) VALUES (?, ?)').run(seq, frame);
+			this.db
+				.prepare('INSERT INTO events (seq, frame, stored_at) VALUES (?, ?, ?)')
+				.run(seq, frame, storedAt);
 
 			return seq;
 		});
@@ -115,6 +155,15 @@ class Outbox {
 
 	/** Deletes every event up to and including `seq`, which the server has stored. */
 	acknowledge(seq: number): void {
+		const now = Date.now();
+		const acknowledged = this.db
+			.prepare('SELECT stored_at FROM events WHERE seq <= ? AND stored_at IS NOT NULL')
+			.all(seq);
+
+		for (const { stored_at: storedAt } of acknowledged) {
+			this.ackDuration.record((now - Number(storedAt)) / 1000);
+		}
+
 		this.db.prepare('DELETE FROM events WHERE seq <= ?').run(seq);
 	}
 
@@ -183,7 +232,28 @@ class Outbox {
 	}
 
 	close(): void {
+		this.meter.removeBatchObservableCallback(this.observeDepth, [
+			this.capturesGauge,
+			this.eventsGauge,
+		]);
 		this.db.close();
+	}
+
+	/** When a capture was taken, or null for one stored before captures were timed. */
+	private capturedAt(capture: number): number | null {
+		const row = this.db.prepare('SELECT captured_at FROM captures WHERE id = ?').get(capture);
+
+		return typeof row?.captured_at === 'number' ? row.captured_at : null;
+	}
+
+	private addColumn(table: string, column: string): void {
+		const columns = this.db.prepare(`PRAGMA table_info(${table})`).all();
+
+		if (columns.some(({ name }) => name === column)) {
+			return;
+		}
+
+		this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} INTEGER`);
 	}
 
 	private lastSeq(): number {
