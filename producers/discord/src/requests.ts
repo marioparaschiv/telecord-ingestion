@@ -15,6 +15,8 @@ import {
 	type DiscordMessagesFetchResultPayload,
 } from '@telecord/ingest-client/discord';
 import {
+	asError,
+	createTaggedLogger,
 	defineProbe,
 	defineRequest,
 	failureMessage,
@@ -29,6 +31,7 @@ import {
 	RequestFailureReason,
 	type IngestMediaFetchResult,
 } from '@telecord/ingest-client';
+import { recordError, withSpan } from '@telecord/producer-otel';
 
 import type { DiscordFilterSubject } from './filter';
 
@@ -45,6 +48,8 @@ const GUILD_PATHS = new Set(['icons', 'banners', 'splashes', 'discovery-splashes
 
 /** Reference type of a reply; forwards and other references carry their content themselves. */
 const REPLY_REFERENCE = 0;
+
+const logger = createTaggedLogger('Discord Requests');
 
 const RawMessagesSchema = z.array(z.looseObject({ id: z.string() }));
 
@@ -169,6 +174,9 @@ async function fetchMessages(
 
 		return { ok: true, messages };
 	} catch (error) {
+		logger.warn(`Failed to fetch messages in ${request.channelId}: ${asError(error).message}`);
+		recordError(error);
+
 		if (error instanceof DiscordAPIError && ACCESS_LOST_STATUSES.has(error.httpStatus)) {
 			return {
 				ok: false,
@@ -247,6 +255,9 @@ async function fetchMedia(
 			? { fileName, ok: true, bytes: bytes.byteLength }
 			: { fileName, ok: false, message: `The upload was answered with HTTP ${status}` };
 	} catch (error) {
+		logger.warn(`Failed to fetch media ${fileName}: ${asError(error).message}`);
+		recordError(error);
+
 		return { fileName, ok: false, message: failureMessage(error) };
 	}
 }
@@ -276,6 +287,9 @@ async function refreshAttachment(
 
 		return { fileName, ok: true, url: fresh };
 	} catch (error) {
+		logger.warn(`Failed to refresh attachment ${fileName}: ${asError(error).message}`);
+		recordError(error);
+
 		return error instanceof DiscordAPIError
 			? { fileName, ok: false, code: error.code, message: failureMessage(error) }
 			: { fileName, ok: false, message: failureMessage(error) };
@@ -301,19 +315,49 @@ export function createDiscordRequests(
 			payload: DiscordMessagesFetch,
 			result: DiscordOpcode.MESSAGES_FETCH_RESULT,
 			resultSchema: DiscordMessagesFetchResult,
-			handle: (request) => fetchMessages(client, filter, request),
+			handle: (request) =>
+				withSpan(
+					'discord.messages_fetch',
+					{
+						'telecord.platform': 'discord',
+						'telecord.request': 'MESSAGES_FETCH',
+						'discord.channel.id': request.channelId,
+						'discord.message.ids': 'ids' in request ? request.ids : undefined,
+					},
+					() => fetchMessages(client, filter, request),
+				),
 		}),
 		[DiscordOpcode.MEDIA_FETCH]: defineRequest({
 			payload: DiscordMediaFetch,
 			result: DiscordOpcode.MEDIA_FETCH_RESULT,
 			resultSchema: IngestMediaFetchResultSchema,
-			handle: (request) => fetchMedia(client, filter, request),
+			handle: (request) =>
+				withSpan(
+					'discord.media_fetch',
+					{
+						'telecord.platform': 'discord',
+						'telecord.request': 'MEDIA_FETCH',
+						'discord.file.name': request.fileName,
+						'url.path': URL.parse(request.url)?.pathname,
+					},
+					() => fetchMedia(client, filter, request),
+				),
 		}),
 		[DiscordOpcode.ATTACHMENT_REFRESH]: defineRequest({
 			payload: DiscordAttachmentRefresh,
 			result: DiscordOpcode.ATTACHMENT_REFRESH_RESULT,
 			resultSchema: DiscordAttachmentRefreshResult,
-			handle: (request) => refreshAttachment(client, filter, request),
+			handle: (request) =>
+				withSpan(
+					'discord.attachment_refresh',
+					{
+						'telecord.platform': 'discord',
+						'telecord.request': 'ATTACHMENT_REFRESH',
+						'discord.file.name': request.fileName,
+						'url.path': URL.parse(request.url)?.pathname,
+					},
+					() => refreshAttachment(client, filter, request),
+				),
 		}),
 	};
 }

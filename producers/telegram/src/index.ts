@@ -1,4 +1,5 @@
 import '@telecord/producer-otel/register';
+import './logging';
 
 import { join } from 'node:path';
 

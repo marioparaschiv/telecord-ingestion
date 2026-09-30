@@ -1,14 +1,11 @@
-import { SpanStatusCode, trace, type Attributes, type Span } from '@opentelemetry/api';
+import { trace, type Attributes, type Span } from '@opentelemetry/api';
 
-import { asError } from '@telecord/producer-core';
+import recordError from './record-error';
 
 const tracer = trace.getTracer('@telecord/producer-otel');
 
 function fail(span: Span, error: unknown): void {
-	const exception = asError(error);
-
-	span.recordException(exception);
-	span.setStatus({ code: SpanStatusCode.ERROR, message: exception.message });
+	recordError(error, span);
 	span.end();
 }
 

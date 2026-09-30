@@ -2,11 +2,16 @@ import type { Client } from 'discord.js-selfbot-v13';
 import { z } from 'zod';
 
 import {
+	IngestConnection,
+	createTaggedLogger,
+	type Filter,
+	type Outbox,
+} from '@telecord/producer-core';
+import {
 	DISCORD_ROUTE,
 	DISCORD_VERSION_PARAM,
 	DiscordOpcode,
 } from '@telecord/ingest-client/discord';
-import { IngestConnection, type Filter, type Outbox } from '@telecord/producer-core';
 import { SessionState } from '@telecord/ingest-client';
 
 import { createDispatchForwarder } from './dispatches';
@@ -20,6 +25,10 @@ const GatewayOptionsSchema = z.object({ version: z.number().int().positive() });
 
 /** The gateway close code for a token Discord no longer accepts. */
 const TOKEN_INVALID_CLOSE_CODE = 4004;
+
+const INVALIDATED_REASON = 'Discord refused the token while reconnecting';
+
+const logger = createTaggedLogger('Discord Producer');
 
 type DiscordProducerOptions = {
 	client: Client;
@@ -89,22 +98,26 @@ export function createDiscordProducer({
 	client.on('shardReconnecting', () =>
 		connection.reportSessionState({ state: SessionState.RECONNECTING }),
 	);
-	client.on('shardDisconnect', ({ code, reason }) =>
+	client.on('shardDisconnect', ({ code, reason }) => {
+		const description = `${code} ${reason}`.trim();
+
+		logger.error(`Discord closed the gateway session for good (${description})`);
 		connection.reportSessionState({
 			state:
 				code === TOKEN_INVALID_CLOSE_CODE
 					? SessionState.INVALID_CREDENTIALS
 					: SessionState.FAILED,
-			reason: `${code} ${reason}`.trim(),
-		}),
-	);
+			reason: description,
+		});
+	});
 	// Emitted when a reconnect is refused with HTTP 401. With a listener, discord.js stops only the gateway connection.
-	client.on('invalidated', () =>
+	client.on('invalidated', () => {
+		logger.error(INVALIDATED_REASON);
 		connection.reportSessionState({
 			state: SessionState.INVALID_CREDENTIALS,
-			reason: 'Discord refused the token while reconnecting',
-		}),
-	);
+			reason: INVALIDATED_REASON,
+		});
+	});
 
 	const dispatches = createDispatchForwarder({
 		client,

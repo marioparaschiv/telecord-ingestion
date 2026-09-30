@@ -1,4 +1,5 @@
 import '@telecord/producer-otel/register';
+import './logging';
 
 import { Client } from 'discord.js-selfbot-v13';
 import { mkdirSync } from 'node:fs';

@@ -117,6 +117,7 @@ export function createSessionMonitor(
 
 	return {
 		onUnauthorized(reason: string): void {
+			logger.error(`Telegram refused the session's authorization (${reason})`);
 			unauthorized = true;
 			// mtcute stops its updates loop on AUTH_KEY_UNREGISTERED without ending the catch-up.
 			catchingUp = false;

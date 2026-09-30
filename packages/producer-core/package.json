@@ -24,6 +24,7 @@
 	},
 	"dependencies": {
 		"@telecord/ingest-client": "catalog:",
+		"evlog": "catalog:",
 		"ws": "catalog:",
 		"zod": "catalog:"
 	},

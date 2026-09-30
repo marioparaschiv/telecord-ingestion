@@ -22,6 +22,8 @@ import {
 	type TelegramUsersFetchResultPayload,
 } from '@telecord/ingest-client/telegram';
 import {
+	asError,
+	createTaggedLogger,
 	defineProbe,
 	defineRequest,
 	failureMessage,
@@ -31,6 +33,7 @@ import {
 	type Filter,
 	type RequestHandler,
 } from '@telecord/producer-core';
+import { recordError, withSpan } from '@telecord/producer-otel';
 import { RequestFailureReason } from '@telecord/ingest-client';
 
 import { decodeFileLocation, serialize, serializeVector, type FileLocation } from './tl';
@@ -56,6 +59,8 @@ const MESSAGES_FETCH_FLOOD_SLEEP = 9 * 60_000;
  * `-503 Timeout` would download for good. The server gives up on `MEDIA_FETCH` after 2 minutes.
  */
 const DOWNLOAD_STALL_TIMEOUT = 60_000;
+
+const logger = createTaggedLogger('Telegram Requests');
 
 type DownloadTarget = { location: FileLocation; dcId: number };
 
@@ -144,6 +149,9 @@ async function fetchMessages(
 	try {
 		return { ok: true, messages: serialize(await readMessages(client, peer, request)) };
 	} catch (error) {
+		logger.warn(`Failed to fetch messages in ${request.peerId}: ${asError(error).message}`);
+		recordError(error);
+
 		return isAccessError(error)
 			? {
 					ok: false,
@@ -174,6 +182,9 @@ async function fetchUsers(
 
 		return { ok: true, users: serializeVector(users) };
 	} catch (error) {
+		logger.warn(`Failed to fetch user ${userId}: ${asError(error).message}`);
+		recordError(error);
+
 		return isAccessError(error)
 			? {
 					ok: false,
@@ -353,6 +364,12 @@ async function downloadRefreshing(
 	}
 }
 
+function mediaSourceOf({ source }: TelegramMediaFetchPayload): string {
+	return source.kind === 'message'
+		? `message ${source.messageId} in ${source.peerId}`
+		: 'an avatar';
+}
+
 /**
  * Answers one `MEDIA_FETCH`: downloads the file from the session and posts it
  * to the presigned upload. The source chat is checked against the filter
@@ -396,6 +413,11 @@ async function fetchMedia(
 			? { ok: true, bytes: bytes.byteLength }
 			: { ok: false, message: `The upload was answered with HTTP ${status}` };
 	} catch (error) {
+		logger.warn(
+			`Failed to fetch media for ${mediaSourceOf(request)}: ${asError(error).message}`,
+		);
+		recordError(error);
+
 		return isAccessError(error)
 			? {
 					ok: false,
@@ -425,19 +447,52 @@ export function createTelegramRequests(
 			payload: TelegramMessagesFetch,
 			result: TelegramOpcode.MESSAGES_FETCH_RESULT,
 			resultSchema: TelegramMessagesFetchResult,
-			handle: (request) => fetchMessages(client, filter, request),
+			handle: (request) =>
+				withSpan(
+					'telegram.messages_fetch',
+					{
+						'telecord.platform': 'telegram',
+						'telecord.request': 'MESSAGES_FETCH',
+						'telegram.chat.id': request.peerId,
+						'telegram.message.ids': 'ids' in request ? request.ids : undefined,
+					},
+					() => fetchMessages(client, filter, request),
+				),
 		}),
 		[TelegramOpcode.MEDIA_FETCH]: defineRequest({
 			payload: TelegramMediaFetch,
 			result: TelegramOpcode.MEDIA_FETCH_RESULT,
 			resultSchema: TelegramMediaFetchResult,
-			handle: (request) => fetchMedia(client, filter, request),
+			handle: (request) =>
+				withSpan(
+					'telegram.media_fetch',
+					{
+						'telecord.platform': 'telegram',
+						'telecord.request': 'MEDIA_FETCH',
+						'telegram.media.source': request.source.kind,
+						'telegram.media.locator': request.locator.kind,
+						...(request.source.kind === 'message' && {
+							'telegram.chat.id': request.source.peerId,
+							'telegram.message.id': request.source.messageId,
+						}),
+					},
+					() => fetchMedia(client, filter, request),
+				),
 		}),
 		[TelegramOpcode.USERS_FETCH]: defineRequest({
 			payload: TelegramUsersFetch,
 			result: TelegramOpcode.USERS_FETCH_RESULT,
 			resultSchema: TelegramUsersFetchResult,
-			handle: (request) => fetchUsers(client, request),
+			handle: (request) =>
+				withSpan(
+					'telegram.users_fetch',
+					{
+						'telecord.platform': 'telegram',
+						'telecord.request': 'USERS_FETCH',
+						'telegram.user.id': request.userId,
+					},
+					() => fetchUsers(client, request),
+				),
 		}),
 	};
 }

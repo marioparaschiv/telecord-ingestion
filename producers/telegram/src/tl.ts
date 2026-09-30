@@ -8,6 +8,7 @@ import {
 import type { tl } from '@mtcute/node';
 
 import { TELEGRAM_FILE_LOCATIONS } from '@telecord/ingest-client/telegram';
+import { asError, createTaggedLogger } from '@telecord/producer-core';
 
 /** A file location a `MEDIA_FETCH` may name. */
 export type FileLocation =
@@ -16,6 +17,8 @@ export type FileLocation =
 	| tl.RawInputPeerPhotoFileLocation;
 
 const FILE_LOCATIONS = new Set<string>(TELEGRAM_FILE_LOCATIONS);
+
+const logger = createTaggedLogger('Telegram TL');
 
 /**
  * Serializes one boxed TL object at the session's layer.
@@ -87,7 +90,9 @@ export function decodeFileLocation(bytes: Uint8Array): FileLocation | undefined 
 
 	try {
 		location = reader.object();
-	} catch {
+	} catch (error) {
+		logger.warn(`Failed to decode a file location: ${asError(error).message}`);
+
 		return undefined;
 	}
 

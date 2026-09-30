@@ -10,6 +10,7 @@ import { metrics } from '@opentelemetry/api';
 
 import { createTaggedLogger } from '@telecord/producer-core';
 
+import { flushLogsDrains } from './logs-drain';
 import parseOtelEnv from './env';
 
 const logger = createTaggedLogger('OTel');
@@ -20,12 +21,14 @@ let meterProvider: MeterProvider | undefined;
 /**
  * Registers the global tracer and meter providers and the undici instrumentation.
  * No-op when telemetry is off.
+ *
+ * @returns Whether telemetry is on.
  */
-export function setup(): void {
+export function setup(): boolean {
 	const env = parseOtelEnv();
 
 	if (!env) {
-		return;
+		return false;
 	}
 
 	// Service identity is owned by OTEL_SERVICE_NAME, so it wins over any
@@ -63,19 +66,31 @@ export function setup(): void {
 
 	metrics.setGlobalMeterProvider(meterProvider);
 
-	// The OTLP exporters send over node:http, which is not instrumented, so exports
-	// never trace their own delivery.
-	registerInstrumentations({ instrumentations: [new UndiciInstrumentation()] });
+	const { origin } = new URL(env.endpoint);
+
+	registerInstrumentations({
+		instrumentations: [
+			new UndiciInstrumentation({
+				// evlog ships logs with fetch, so exports to the endpoint are excluded to keep
+				// traces from describing their own delivery.
+				ignoreRequestHook: (request) => request.origin === origin,
+			}),
+		],
+	});
 
 	logger.info(`Initialized (${env.serviceName} → ${env.endpoint})`);
+
+	return true;
 }
 
 /**
  * Flushes buffered telemetry and tears down the providers {@link setup} registered.
  * Safe to call when {@link setup} never ran.
  *
- * @returns A promise settling once both providers have shut down.
+ * @returns A promise settling once the log drains and providers have finished.
  */
 export async function shutdown(): Promise<void> {
+	// Logs flush first so records produced during shutdown still reach the collector.
+	await flushLogsDrains();
 	await Promise.all([tracerProvider?.shutdown(), meterProvider?.shutdown()]);
 }
