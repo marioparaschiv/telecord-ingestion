@@ -1,21 +1,31 @@
 import { z } from 'zod';
 
-const FilterActionSchema = z.enum(['allow', 'deny']);
+import JsonTextSchema from './config/json-text';
 
-type FilterAction = z.output<typeof FilterActionSchema>;
+export const FilterActionSchema = z.enum(['allow', 'deny']);
+
+export type FilterAction = z.output<typeof FilterActionSchema>;
 
 /** What a rule is matched against: an event, a chat in a snapshot, or the chat a request names. */
 type FilterSubject = Readonly<Partial<Record<string, string>>>;
 
-type FilterRule = {
+/** Every listed field must hold one of its values; an empty match matches everything. */
+export type FilterMatch = Readonly<Partial<Record<string, readonly string[]>>>;
+
+export type FilterRule = {
 	action: FilterAction;
-	/** Every listed field must hold one of its values; an empty match matches everything. */
-	match: Readonly<Partial<Record<string, readonly string[]>>>;
+	match: FilterMatch;
 };
 
 export type Filter = {
 	rules: readonly FilterRule[];
 	/** The action when no rule matches. */
+	fallback: FilterAction;
+};
+
+/** The `filter` table as configured: its rules are unset when the producer's defaults apply. */
+export type FilterConfig = {
+	rules: readonly FilterRule[] | undefined;
 	fallback: FilterAction;
 };
 
@@ -46,33 +56,26 @@ export function createFilterRulesSchema(fields: Record<string, z.ZodType<string>
 }
 
 /**
- * The environment variables that configure a producer's filter: `FILTER_RULES`,
- * a JSON rule list, and `FILTER_DEFAULT`, the action when no rule matches.
+ * The `filter` table of a producer's config: `rules`, a TOML array of tables or
+ * the JSON list `FILTER_RULES` holds, and `default`, the action when no rule matches.
  *
  * @param fields - The subject fields a rule may match on.
- * @param defaultRules - The rules used when `FILTER_RULES` is unset.
- * @returns The shape to spread into the producer's environment schema.
+ * @returns The table's schema.
  */
-export function createFilterEnvShape(
-	fields: Record<string, z.ZodType<string>>,
-	defaultRules: readonly object[],
-) {
-	return {
-		FILTER_RULES: z
-			.string()
-			.default(JSON.stringify(defaultRules))
-			.transform((raw, context) => {
-				try {
-					return JSON.parse(raw);
-				} catch (error) {
-					context.addIssue({ code: 'custom', message: `Not JSON: ${String(error)}` });
-
-					return z.NEVER;
-				}
-			})
-			.pipe(createFilterRulesSchema(fields)),
-		FILTER_DEFAULT: FilterActionSchema.default('allow'),
-	};
+export function createFilterConfigSchema(fields: Record<string, z.ZodType<string>>) {
+	return z
+		.object({
+			rules: JsonTextSchema.pipe(createFilterRulesSchema(fields)).optional().meta({
+				env: 'FILTER_RULES',
+				description:
+					'The ordered rules; the first one matching a chat or event decides. JSON in the environment.',
+			}),
+			default: FilterActionSchema.default('allow').meta({
+				env: 'FILTER_DEFAULT',
+				description: 'The action, allow or deny, when no rule matches.',
+			}),
+		})
+		.transform(({ rules, default: fallback }): FilterConfig => ({ rules, fallback }));
 }
 
 function matches({ match }: FilterRule, subject: FilterSubject): boolean {

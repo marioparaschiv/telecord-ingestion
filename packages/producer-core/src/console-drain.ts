@@ -23,6 +23,8 @@ function paint(color: string, text: string): string {
 /**
  * Terminal console drain rendering the time, level, service and tag ahead of
  * the message. It replaces evlog's own printer, so pair it with `silent: true`.
+ * Every level goes to stderr, keeping stdout for what a mode such as
+ * `list-chats` prints.
  *
  * @returns A drain that writes one styled line per event.
  */
@@ -51,7 +53,7 @@ function createConsoleDrain(): DrainFn {
 			.filter(Boolean)
 			.join(' ');
 
-		console[level](line);
+		process.stderr.write(`${line}\n`);
 	};
 }
 

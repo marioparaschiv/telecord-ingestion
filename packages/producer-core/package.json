@@ -12,6 +12,11 @@
 			"development": "./src/index.ts",
 			"import": "./dist/index.mjs"
 		},
+		"./config": {
+			"types": "./src/config/index.ts",
+			"development": "./src/config/index.ts",
+			"import": "./dist/config/index.mjs"
+		},
 		"./testing": {
 			"types": "./src/testing/index.ts",
 			"development": "./src/testing/index.ts",
@@ -26,6 +31,7 @@
 		"@opentelemetry/api": "catalog:",
 		"@telecord/ingest-client": "catalog:",
 		"evlog": "catalog:",
+		"smol-toml": "catalog:",
 		"ws": "catalog:",
 		"zod": "catalog:"
 	},
