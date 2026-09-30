@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { watchCalls, type SessionSignals } from './session';
+import bridgeMtcuteLogs from './mtcute-logs';
 
 export const SESSION_FILE = 'telegram.session';
 
@@ -36,7 +37,7 @@ function createTelegramClient({
 }: TelegramClientOptions): TelegramClient {
 	mkdirSync(dataDir, { recursive: true });
 
-	return new TelegramClient({
+	const client = new TelegramClient({
 		apiId,
 		apiHash,
 		storage: new SqliteStorage(join(dataDir, SESSION_FILE)),
@@ -49,6 +50,10 @@ function createTelegramClient({
 			systemVersion: '1.0.0',
 		},
 	});
+
+	bridgeMtcuteLogs(client.log.mgr);
+
+	return client;
 }
 
 export default createTelegramClient;
