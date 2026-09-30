@@ -10,6 +10,8 @@ import {
 } from 'discord.js-selfbot-v13';
 
 import {
+	asError,
+	createTaggedLogger,
 	defineSnapshot,
 	isAllowed,
 	type Filter,
@@ -20,6 +22,8 @@ import { CHATS_PART_MAX_CHATS } from '@telecord/ingest-client';
 import { traceRequest } from '@telecord/producer-otel';
 
 import { subjectOfChannel } from './channels';
+
+const logger = createTaggedLogger('Discord Snapshot');
 
 const ROLE_OVERWRITE = 0;
 const MEMBER_OVERWRITE = 1;
@@ -96,14 +100,42 @@ function rawSelfMember(member: GuildMember) {
 	};
 }
 
+/**
+ * The account's own member of a guild: the cached one, or else fetched over REST. A failed fetch is
+ * logged and answers undefined, so the guild ships without it.
+ */
+async function selfMemberOf(guild: Guild): Promise<GuildMember | undefined> {
+	const userId = guild.client.user?.id;
+
+	if (!userId) {
+		return undefined;
+	}
+
+	// Not `members.me`: with member partials enabled it invents an empty member when none is cached.
+	const cached = guild.members.cache.get(userId);
+
+	if (cached) {
+		return cached;
+	}
+
+	try {
+		return await guild.members.fetchMe();
+	} catch (error) {
+		logger.warn(
+			`Failed to fetch the account's member of guild ${guild.id}: ${asError(error).message}`,
+		);
+
+		return undefined;
+	}
+}
+
 /** A cached guild as a raw guild object, holding only the channels the filter rules allow. */
-function rawGuild(guild: Guild, filter: Filter) {
+async function rawGuild(guild: Guild, filter: Filter) {
 	const channels = guild.channels.cache
 		.filter((channel): channel is NonThreadGuildBasedChannel => !channel.isThread())
 		.filter((channel) => isAllowed(filter, subjectOfChannel(channel)))
 		.map(rawChannel);
-	// Not `members.me`: with member partials enabled it invents an empty member when none is cached.
-	const self = guild.client.user && guild.members.cache.get(guild.client.user.id);
+	const self = await selfMemberOf(guild);
 
 	return {
 		id: guild.id,
@@ -147,9 +179,9 @@ function rawPrivateChannels(client: Client, filter: Filter): object[] {
 }
 
 /**
- * The account's chats as snapshot parts, read from the gateway cache alone:
- * one part per guild, then the DMs and group DMs. Nothing is fetched, so a
- * guild whose own member is not cached ships without `self_member`.
+ * The account's chats as snapshot parts, read from the gateway cache: one part
+ * per guild, then the DMs and group DMs. Only the account's own member of a
+ * guild whose member is not cached is fetched.
  */
 async function* snapshotParts(
 	client: Client,
@@ -157,7 +189,7 @@ async function* snapshotParts(
 ): AsyncGenerator<DiscordChatsPartFields> {
 	for (const guild of client.guilds.cache.values()) {
 		if (isAllowed(filter, { type: 'guild', guildId: guild.id })) {
-			yield { guilds: [rawGuild(guild, filter)], private_channels: [] };
+			yield { guilds: [await rawGuild(guild, filter)], private_channels: [] };
 		}
 	}
 

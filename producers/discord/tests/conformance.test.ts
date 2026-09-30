@@ -16,7 +16,7 @@ import {
 	type IngestEnvelope,
 } from '@telecord/ingest-client';
 import type { EventVector, RequestVector, VectorFrame } from '@telecord/producer-core/testing';
-import type { Filter } from '@telecord/producer-core';
+import { initLogger, type Filter } from '@telecord/producer-core';
 
 import {
 	GENERAL_CHANNEL_ID,
@@ -265,30 +265,77 @@ describe('request vectors', () => {
 		expect(cdn).not.toHaveBeenCalled();
 	});
 
-	it('request/chats-fetch-without-self-member: ships a guild whose own member is not cached without one', async () => {
-		await start();
+	describe('a guild whose own member is not cached', () => {
+		/** The vector guild announced without members, so the cache holds no member of the account. */
+		async function announceMemberless() {
+			const snapshot = requests.find(
+				({ id }) => id === 'request/chats-fetch-without-self-member',
+			);
+			const [guild] = (snapshot?.reply ?? []).flatMap(
+				(part) => DiscordChatsPart.parse(part.d).guilds,
+			);
 
-		const snapshot = requests.find(
-			({ id }) => id === 'request/chats-fetch-without-self-member',
-		);
-		const [expected] = (snapshot?.reply ?? []).flatMap(
-			(part) => DiscordChatsPart.parse(part.d).guilds,
-		);
+			if (!guild) {
+				throw new Error('request/chats-fetch-without-self-member carries no guild');
+			}
 
-		if (!expected) {
-			throw new Error('request/chats-fetch-without-self-member carries no guild');
+			harness.gateway.dispatch('GUILD_CREATE', guild);
+			await harness.socket.nextFrame();
+
+			return guild;
 		}
 
-		harness.gateway.dispatch('GUILD_CREATE', expected);
-		await harness.socket.nextFrame();
+		async function snapshotGuild(guildId: string) {
+			const parts = (await ask(DiscordOpcode.CHATS_FETCH, {}, 'snapshot')).map((part) =>
+				DiscordChatsPart.parse(part.d),
+			);
 
-		const parts = (await ask(DiscordOpcode.CHATS_FETCH, {}, 'snapshot')).map((part) =>
-			DiscordChatsPart.parse(part.d),
-		);
+			return parts.flatMap(({ guilds }) => guilds).find(({ id }) => id === guildId);
+		}
 
-		expect(parts.flatMap(({ guilds }) => guilds).find(({ id }) => id === expected.id)).toEqual(
-			expected,
-		);
+		it('request/chats-fetch: ships the member fetched over REST', async () => {
+			await start();
+
+			const guild = await announceMemberless();
+
+			harness.routes.set(`GET /api/v9/guilds/${guild.id}/members/${SELF.id}`, () => ({
+				user: SELF,
+				roles: [],
+				joined_at: '2025-09-16T05:20:00.000000+00:00',
+				deaf: false,
+				mute: false,
+			}));
+
+			expect(await snapshotGuild(guild.id)).toEqual({ ...guild, self_member: { roles: [] } });
+			expect(
+				harness.rest.mock.calls.filter(([input]) =>
+					String(input).endsWith(`/guilds/${guild.id}/members/${SELF.id}`),
+				),
+			).toHaveLength(1);
+		});
+
+		it('request/chats-fetch-without-self-member: ships the guild without one when the fetch fails, logging the guild', async () => {
+			const warnings: unknown[] = [];
+
+			initLogger({
+				silent: true,
+				drain: ({ event: { level, message } }) => {
+					if (level === 'warn') {
+						warnings.push(message);
+					}
+				},
+			});
+			await start();
+
+			const guild = await announceMemberless();
+
+			expect(await snapshotGuild(guild.id)).toEqual(guild);
+			expect(warnings).toContainEqual(
+				expect.stringContaining(
+					`Failed to fetch the account's member of guild ${guild.id}`,
+				),
+			);
+		});
 	});
 
 	it("request/chats-fetch: names each channel's newest message as it arrived", async () => {
