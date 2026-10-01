@@ -1,13 +1,13 @@
-import { checkbox, confirm } from '@inquirer/prompts';
+import { checkbox, confirm, select } from '@inquirer/prompts';
 import { Command, Option } from 'commander';
 
 import { composeProfiles, enabledPlatforms, installDirOption, openInstall } from '../install';
-import { parseConfigFile, readConfigFile, writeConfigFile } from '../config-file';
+import { parseConfigFile, readConfigFile, valueAt, writeConfigFile } from '../config-file';
+import { resolveSettings, type SettingValue } from '../resolve-settings';
 import { configProblem, serviceEnvironment } from '../config-check';
 import PLATFORMS, { type PlatformName } from '../platforms';
 import { compose, composeModel, docker } from '../docker';
 import { readEnvFile, writeEnvFile } from '../env-file';
-import { resolveSettings } from '../resolve-settings';
 import { canPrompt, promptSetting } from '../prompt';
 import errorMessage from '../error-message';
 import { allSettings } from '../settings';
@@ -38,6 +38,9 @@ const settingOptions = settings.flatMap((setting) =>
 			],
 );
 const secrets = settings.filter((setting) => setting.secret);
+
+/** The setting that makes the Telegram producer connect a bot instead of a user account. */
+const BOT_TOKEN_KEY = 'telegram.bot_token';
 
 type SetupOptions = {
 	dir?: string;
@@ -112,6 +115,29 @@ async function chooseUpdater(
 			'Install updates automatically? The updater verifies each release and needs access to the Docker socket.',
 		default: true,
 	});
+}
+
+/**
+ * Asks whether Telegram connects a user account or a bot, and for a bot its token.
+ *
+ * @returns The token to write, or undefined for a user account.
+ */
+async function chooseBotToken(): Promise<SettingValue | undefined> {
+	const setting = settings.find(({ key }) => key === BOT_TOKEN_KEY);
+
+	if (setting === undefined) {
+		throw new Error(`Failed to ask for the Telegram account: no setting ${BOT_TOKEN_KEY}`);
+	}
+
+	const bot = await select({
+		message: 'Telegram account to connect',
+		choices: [
+			{ name: 'A user account', value: false },
+			{ name: 'A bot', value: true },
+		],
+	});
+
+	return bot ? { setting, value: await promptSetting(setting) } : undefined;
 }
 
 const setup = new Command('setup')
@@ -199,10 +225,26 @@ setup.action(async (options: SetupOptions) => {
 			prompt: interactive ? promptSetting : undefined,
 		},
 	);
-	const source = values.reduce(
-		(text, { setting, value }) => setTomlValue(text, setting.tomlPath, value),
-		current,
-	);
+	const addsTelegram = platforms.includes('telegram') && !previous.includes('telegram');
+	const hasBotToken = (text: string) =>
+		valueAt(parseConfigFile(install.config, text), BOT_TOKEN_KEY.split('.')) !== undefined;
+	const writeValues = (settled: readonly SettingValue[]) =>
+		settled.reduce(
+			(text, { setting, value }) => setTomlValue(text, setting.tomlPath, value),
+			current,
+		);
+
+	if (interactive && addsTelegram && !hasBotToken(writeValues(values))) {
+		const token = await chooseBotToken();
+
+		if (token !== undefined) {
+			values.push(token);
+		}
+	}
+
+	const source = writeValues(values);
+	// A bot logs in with its token and has learned no chats to pick from yet.
+	const addsBot = addsTelegram && hasBotToken(source);
 	const user = hostUser();
 
 	await writeConfigFile(install.config, source);
@@ -243,7 +285,7 @@ setup.action(async (options: SetupOptions) => {
 		await compose(install.dir, ['--profile', '*', 'rm', '--stop', '--force', ...dropped]);
 	}
 
-	const pendingLogin = platforms.includes('telegram') && !previous.includes('telegram');
+	const pendingLogin = addsTelegram && !addsBot;
 
 	if (pendingLogin && interactive) {
 		console.log('Log in to Telegram: answer the phone, code and 2FA prompts.');
@@ -270,7 +312,9 @@ setup.action(async (options: SetupOptions) => {
 
 	try {
 		for (const platform of platforms) {
-			await pickChats(install, platform);
+			if (platform !== 'telegram' || !addsBot) {
+				await pickChats(install, platform);
+			}
 		}
 	} catch (error) {
 		throw new Error(
