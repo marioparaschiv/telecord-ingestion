@@ -6,7 +6,7 @@
 
 <b>Connect your Telegram and Discord accounts to Telecord, on your own machine.</b>
 
-A producer logs in as your account and sends the chats you choose to a Telecord server. You run it, so the server only sees what it sends.
+A producer logs in as your account, or as a Telegram bot, and sends the chats you choose to a Telecord server. You run it, so the server only sees what it sends.
 
 <br />
 
@@ -61,7 +61,7 @@ curl -fsSL https://raw.githubusercontent.com/marioparaschiv/telecord-ingestion/m
 irm https://raw.githubusercontent.com/marioparaschiv/telecord-ingestion/main/install.ps1 | iex
 ```
 
-Takes about 5 minutes. You need Docker with Compose, and a Telecord API key for each account. Telegram also needs an API id and hash from [my.telegram.org](https://my.telegram.org).
+Takes about 5 minutes. You need Docker with Compose, and a Telecord API key for each account. Telegram also needs an API id and hash from [my.telegram.org](https://my.telegram.org), for a bot too.
 
 The installer:
 
@@ -70,6 +70,8 @@ The installer:
 3. Runs `telecord-ingestion setup`, which asks which platforms to run and for your credentials.
 4. Logs you in to Telegram and starts the containers.
 5. Opens the chat picker, so you choose what is shared.
+
+Connecting a Telegram bot? Setup asks "A user account" or "A bot", then for the bot's token. A bot skips the Telegram login and the Telegram chat picker. See [Connect a Telegram bot](#connect-a-telegram-bot).
 
 Settings go in `~/telecord-ingestion` unless you pass `--dir`.
 
@@ -98,7 +100,7 @@ curl -fsSL https://raw.githubusercontent.com/marioparaschiv/telecord-ingestion/m
 - Setup's flags go after `sh -s --`. Secrets have no flag: they come from `TELECORD_` variables, so they stay out of the process list.
 - `--yes` never asks. It fails when a required setting is missing, naming it.
 - `--simple` still asks for missing settings and logs in to Telegram, but skips the chat picker. What's forwarded then follows `config.toml`; run `telecord-ingestion filters` later to pick chats.
-- The Telegram login asks for a code, so it waits for you. Run `telecord-ingestion login telegram` in a terminal afterwards.
+- The Telegram login asks for a code, so it waits for you. Run `telecord-ingestion login telegram` in a terminal afterwards. A bot has no login: set `TELECORD_TELEGRAM_BOT_TOKEN` and it starts right away.
 - Every setting has a flag and a `TELECORD_` variable. See the [settings reference](#settings-reference).
 
 On Windows, set the variables with `$env:TELECORD_DISCORD_TOKEN = '...'`, then:
@@ -130,7 +132,7 @@ Check it worked: `telecord-ingestion status`.
     ```
 
 4. Add your settings to `config.toml`. Copy the [example](#configuration) and delete the platform you don't run.
-5. Log in to Telegram once. Answer the phone, code and 2FA prompts. It exits once the session is saved.
+5. Log in to Telegram once. Answer the phone, code and 2FA prompts. It exits once the session is saved. Skip this step for a bot.
 
     ```sh
     docker compose run --rm telegram login
@@ -181,6 +183,8 @@ Advanced keys:
 | Esc (in search)     | Clear the search                                        |
 
 Telegram stops for a few seconds while the picker lists its chats, since both use the same session.
+
+For a Telegram bot, the picker lists only the chats the bot has learned so far. See [Connect a Telegram bot](#connect-a-telegram-bot).
 
 ### The forward table
 
@@ -419,6 +423,30 @@ telecord-ingestion restart
 
 To share one DM only, list it in `allow` instead. See [Recipes](#recipes).
 
+### Connect a Telegram bot
+
+```sh
+telecord-ingestion config set telegram.bot_token
+telecord-ingestion restart
+```
+
+The first command asks for the token from @BotFather with a hidden prompt. Telegram then connects that bot instead of a user account.
+
+- `api_id` and `api_hash` are still required.
+- A bot has no phone, code or 2FA login.
+- On a new install, `telecord-ingestion setup` asks "A user account" or "A bot", then for the token.
+- To go back to your user account, delete the `bot_token` line and restart. Each account keeps its own state, so you don't log in again.
+
+Check it worked: `telecord-ingestion logs -n 20 telegram` shows `Logged in as` and the bot's name.
+
+What is different for a bot:
+
+- **It cannot list its chats.** It learns each chat when something happens in it.
+- **Chats it joined before its first run appear later.** Each one shows up once it has activity.
+- **The picker lists only learned chats.** Setup skips it for a new bot. Run `telecord-ingestion filters telegram` once chats have appeared. Until then, the [defaults](#defaults) apply.
+- **History still works.** It is read by message id, and gaps are still backfilled.
+- **Forum topics open one by one.** A topic opens when a message arrives in it, not all up front.
+
 ### Rotate an API key
 
 1. Set the new key. In a terminal, it asks with a hidden prompt:
@@ -609,7 +637,7 @@ Setup and upkeep:
 | ------------------------------------------- | ---------------------------------------------------------------- |
 | `telecord-ingestion setup`                  | Sets up an install, or changes one. Asks only for what is missing. |
 | `telecord-ingestion config set <key> [value]` | Sets one key in `config.toml`, keeping your comments and layout. |
-| `telecord-ingestion login telegram`         | Logs in to Telegram, then starts it                              |
+| `telecord-ingestion login telegram`         | Logs a user account in to Telegram, then starts it. A bot needs no login. |
 | `telecord-ingestion update`                 | Updates the CLI to the latest release                            |
 | `telecord-ingestion uninstall`              | Removes the containers. See below.                               |
 
@@ -663,6 +691,16 @@ telecord-ingestion logs -f telegram
 
 In the `telegram-data` Docker volume. It survives restarts, updates and `telecord-ingestion uninstall`. `uninstall --purge` deletes it.
 
+Each account has its own directory there, `/data/<account id>/` inside the container. Switching between accounts keeps each one's state. An older install is moved on start, with no new login.
+
+### Can I connect a Telegram bot instead of my account?
+
+Yes. Set `bot_token` in `[telegram]`, or choose "A bot" in setup. See [Connect a Telegram bot](#connect-a-telegram-bot).
+
+### My bot is in a chat, but the picker doesn't list it. Why?
+
+A bot cannot list its chats. It learns a chat when something happens in it. Wait for a message there, then run `telecord-ingestion filters telegram` again.
+
 ### What if I don't update?
 
 It keeps working until the server stops accepting your Telegram layer or Discord API version. Then the connection is refused.
@@ -702,6 +740,8 @@ These are the only requests. Each one about a chat is checked against your filte
 | `CUSTOM_EMOJIS_FETCH` | yes      | no      | Reads which file format a custom emoji reaction is.            |
 | `FORUM_TOPICS_FETCH`  | yes      | no      | Lists the topics of one forum a new message opened.            |
 | `PROBE`               | yes      | yes     | Checks the producer is connected and responding.               |
+
+A Telegram bot answers `FORUM_TOPICS_FETCH` with the topic of that message only. Its other topics open as messages arrive in them.
 
 `MEDIA_FETCH` is limited: Telegram accepts only documents, photos and chat photos, and Discord downloads only from Discord's CDN.
 
@@ -757,7 +797,7 @@ Both producers run:
 - with no Linux capabilities and `no-new-privileges`;
 - with a `/tmp` that is cleared on restart.
 
-Each producer also gets a `/data` volume for its outbox. On Telegram it also holds the login session. On Discord it holds the gateway session, which a restart resumes.
+Each producer also gets a `/data` volume for its outbox. On Telegram it holds one directory per account, each with that account's outbox and login session. On Discord it holds the gateway session, which a restart resumes.
 
 Setup leaves `config.toml` and `.env` readable by you only, since they hold your keys.
 
