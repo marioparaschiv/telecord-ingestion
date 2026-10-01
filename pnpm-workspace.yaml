@@ -15,7 +15,7 @@ catalog:
   '@mtcute/node': 0.32.3
   '@opentelemetry/api': ^1.9.1
   '@opentelemetry/sdk-metrics': ^2.7.1
-  '@telecord/ingest-client': ^0.9.0
+  '@telecord/ingest-client': ^0.10.0
   '@total-typescript/ts-reset': ^0.6.1
   '@types/bun': ^1.4.2
   '@types/node': ^24.0.0
