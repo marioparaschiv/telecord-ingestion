@@ -22,6 +22,8 @@ import {
 } from '@telecord/producer-core';
 import { withSpan } from '@telecord/producer-otel';
 
+import type ChatStore from './chats';
+
 import {
 	fetchFullChat,
 	fetchFullUser,
@@ -65,6 +67,15 @@ const FULL_CHAT_UPDATES = new Set<string>([
 		'updateEditChannelMessage',
 	] satisfies TelegramForwardedUpdate[]),
 ]);
+
+/**
+ * Updates that only say a chat changed and is to be fetched again. Telegram sends them when the
+ * account leaves a chat as well as when it joins, so they say nothing of whether it is in the chat.
+ */
+const CHAT_REFETCH_UPDATES = new Set<string>([
+	'updateChannel',
+	'updateChat',
+] satisfies TelegramForwardedUpdate[]);
 
 function isForwarded(update: tl.TypeUpdate): update is ForwardedUpdate {
 	return FORWARDED_UPDATES.has(update._);
@@ -120,6 +131,40 @@ function chatIdOf(update: ForwardedUpdate): number | undefined {
 	}
 }
 
+/** Whether an update shows the account itself out of the chat it concerns: left, kicked or banned. */
+function isOwnDeparture(update: ForwardedUpdate, selfId: number | undefined): boolean {
+	switch (update._) {
+		case 'updateChatParticipant':
+			return update.userId === selfId && !update.newParticipant;
+
+		case 'updateChannelParticipant': {
+			const { newParticipant } = update;
+
+			return (
+				update.userId === selfId &&
+				(!newParticipant ||
+					newParticipant._ === 'channelParticipantLeft' ||
+					(newParticipant._ === 'channelParticipantBanned' &&
+						newParticipant.left === true))
+			);
+		}
+
+		case 'updateNewMessage':
+		case 'updateNewChannelMessage': {
+			const { message } = update;
+
+			return (
+				message._ === 'messageService' &&
+				message.action._ === 'messageActionChatDeleteUser' &&
+				message.action.userId === selfId
+			);
+		}
+
+		default:
+			return false;
+	}
+}
+
 /** The id of the link preview a message is still waiting on, if any. */
 function pendingWebPageOf(update: ForwardedUpdate): string | undefined {
 	if (!('message' in update) || update.message._ !== 'message') {
@@ -158,6 +203,8 @@ type UpdateForwarderOptions = {
 	filter: Filter;
 	/** Holds each update from the moment mtcute emits it until its frame is stored. */
 	outbox: Outbox;
+	/** Where a bot keeps the chats its updates name, the only list of them it has. */
+	chats?: ChatStore;
 	/** Stores the frame built from a capture, releasing the capture with it. */
 	send: (payload: TelegramUpdatePayload, capture: number) => void;
 };
@@ -178,10 +225,21 @@ type UpdateForwarderOptions = {
  * Updates are handled one at a time, in the order mtcute emitted them, so a
  * chat fetched for one update never lets a later update overtake it.
  *
- * @param options - The session, the filter rules, the outbox and where frames go.
+ * A bot learns the chats it is in from the updates as they are captured, before
+ * the filter rules apply: each chat an update names, with the newest message
+ * seen in it, until an update shows the bot out of the chat.
+ *
+ * @param options - The session, the filter rules, the outbox, a bot's learned chats and where
+ * frames go.
  * @returns The handlers to register on the client, and `start` to call once the session is ready.
  */
-export function createUpdateForwarder({ client, filter, outbox, send }: UpdateForwarderOptions) {
+export function createUpdateForwarder({
+	client,
+	filter,
+	outbox,
+	chats,
+	send,
+}: UpdateForwarderOptions) {
 	const logger = createTaggedLogger('Telegram Updates');
 	const { promise: started, resolve: start } = Promise.withResolvers<void>();
 	/**
@@ -353,7 +411,22 @@ export function createUpdateForwarder({ client, filter, outbox, send }: UpdateFo
 		});
 	}
 
+	function learnChat(update: ForwardedUpdate): void {
+		const chatId = chatIdOf(update);
+
+		if (!chats || chatId === undefined) {
+			return;
+		}
+
+		if (isOwnDeparture(update, client.storage.self.getCached(true)?.userId)) {
+			chats.forget(chatId);
+		} else if (!CHAT_REFETCH_UPDATES.has(update._)) {
+			chats.learn(chatId, 'message' in update ? update.message.id : 0);
+		}
+	}
+
 	function enqueueUpdate(update: ForwardedUpdate, peers: PeersIndex, capture: number): void {
+		learnChat(update);
 		enqueue(update._, capture, () => forwardUpdate(update, peers));
 	}
 
@@ -361,6 +434,12 @@ export function createUpdateForwarder({ client, filter, outbox, send }: UpdateFo
 		difference: tl.updates.RawChannelDifferenceTooLong,
 		capture: number,
 	): void {
+		const { dialog } = difference;
+
+		if (dialog._ === 'dialog') {
+			chats?.learn(getMarkedPeerId(dialog.peer), dialog.topMessage);
+		}
+
 		enqueue('a channel difference', capture, () => forwardChannelTooLong(difference));
 	}
 

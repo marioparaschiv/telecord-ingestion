@@ -7,6 +7,8 @@ import {
 } from '@telecord/ingest-client/telegram';
 import { IngestConnection, type Filter, type Outbox } from '@telecord/producer-core';
 
+import type ChatStore from './chats';
+
 import { createTelegramRequests } from './requests';
 import { createTelegramSnapshot } from './snapshot';
 import { createUpdateForwarder } from './updates';
@@ -20,6 +22,8 @@ type TelegramProducerOptions = {
 	apiKey: string;
 	/** The stream the account's updates are captured in and sent from. */
 	outbox: Outbox;
+	/** The chats a bot learned. Absent for a user account, which lists its dialogs and history. */
+	chats?: ChatStore;
 	/** The most events sent and not yet acknowledged. */
 	window: number;
 	/** Where files are written while `MEDIA_FETCH` downloads them. */
@@ -33,8 +37,8 @@ type TelegramProducerOptions = {
  * route is declared at mtcute's TL layer, the layer every payload is
  * serialized at.
  *
- * @param options - The session, filter rules, server, outbox, download directory and
- * fatal-refusal handler.
+ * @param options - The session, filter rules, server, outbox, a bot's learned chats, download
+ * directory and fatal-refusal handler.
  * @returns The connection, not yet started, the update handlers to register on the client, and
  * the session monitor, which the connection reports the session's state from.
  */
@@ -44,6 +48,7 @@ export function createTelegramProducer({
 	url,
 	apiKey,
 	outbox,
+	chats,
 	window,
 	downloadDir,
 	onFatal,
@@ -70,8 +75,8 @@ export function createTelegramProducer({
 			return identity;
 		},
 		requests: {
-			...createTelegramRequests(client, filter, downloadDir),
-			[TelegramOpcode.CHATS_FETCH]: createTelegramSnapshot(client, filter),
+			...createTelegramRequests(client, filter, downloadDir, chats),
+			[TelegramOpcode.CHATS_FETCH]: createTelegramSnapshot(client, filter, chats),
 		},
 		onFatal,
 	});
@@ -80,6 +85,7 @@ export function createTelegramProducer({
 		client,
 		filter,
 		outbox,
+		chats,
 		send: (payload, capture) => connection.send(TelegramOpcode.UPDATE, payload, capture),
 	});
 

@@ -47,6 +47,8 @@ import {
 import { recordError, withSpan } from '@telecord/producer-otel';
 import { RequestFailureReason } from '@telecord/ingest-client';
 
+import type ChatStore from './chats';
+
 import { decodeFileLocation, serialize, serializeVector, type FileLocation } from './tl';
 import { resolveInputPeer, subjectOfMarkedId } from './peers';
 import { forumTopicPages } from './snapshot';
@@ -82,6 +84,12 @@ const DOWNLOAD_STALL_RETRIES = 1;
 /** How often a download that is receiving bytes reports its progress. */
 const PROGRESS_INTERVAL = 15_000;
 
+/** The most message ids one `getMessages` call reads. */
+const ID_WALK_WINDOW = 100;
+
+/** The most windows one range `MESSAGES_FETCH` reads, so a sparse range still ends in an answer. */
+const ID_WALK_MAX_WINDOWS = 50;
+
 /** The most topic pages one `FORUM_TOPICS_FETCH_RESULT` carries. */
 const FORUM_TOPICS_MAX_PAGES = 1_000;
 
@@ -114,23 +122,127 @@ async function isChatAllowed(
 	return isAllowed(filter, await subjectOfMarkedId(client, markedId));
 }
 
+function readMessagesById(
+	client: TelegramClient,
+	peer: tl.TypeInputPeer,
+	ids: readonly number[],
+): Promise<tl.messages.TypeMessages> {
+	const options = { floodSleepThreshold: MESSAGES_FETCH_FLOOD_SLEEP };
+	const id = ids.map((messageId): tl.TypeInputMessage => ({
+		_: 'inputMessageID',
+		id: messageId,
+	}));
+
+	// Channel message ids are per channel, so they are read through the channel itself.
+	return isInputPeerChannel(peer)
+		? client.call({ _: 'channels.getMessages', channel: toInputChannel(peer), id }, options)
+		: client.call({ _: 'messages.getMessages', id }, options);
+}
+
+type MessagesRange = Exclude<TelegramMessagesFetchPayload, { ids: number[] }>;
+
+/**
+ * One page of a chat's history for a bot, which Telegram refuses `messages.getHistory`. The ids
+ * of the range are read window by window, upwards for a page after an id alone and downwards
+ * otherwise, until the page is full or the range is spent.
+ *
+ * Outside channels message ids are shared by every chat of the account, so a
+ * window also returns other chats' messages, which are dropped. The walk ends
+ * at `ID_WALK_MAX_WINDOWS`, which leaves the page short.
+ *
+ * @param client - The bot's session.
+ * @param peer - The chat.
+ * @param markedId - The chat's marked id.
+ * @param range - The page asked for.
+ * @param top - The id of the newest message seen in the chat, which no id of the page is past.
+ * @returns The page as `messages.getHistory` orders it, newest first.
+ */
+async function walkMessages(
+	client: TelegramClient,
+	peer: tl.TypeInputPeer,
+	markedId: number,
+	{ before, after = 0, limit }: MessagesRange,
+	top: number,
+): Promise<tl.messages.RawMessages> {
+	const ascending = before === undefined && after > 0;
+	const messages: tl.TypeMessage[] = [];
+	const topics = new Map<number, tl.TypeForumTopic>();
+	const chats = new Map<number, tl.TypeChat>();
+	const users = new Map<number, tl.TypeUser>();
+	let low = after + 1;
+	let high = before === undefined ? top : Math.min(top, before - 1);
+
+	for (let window = 0; low <= high && messages.length < limit; window++) {
+		if (window === ID_WALK_MAX_WINDOWS) {
+			logger.warn(
+				`Stopped reading ${markedId} after ${window * ID_WALK_WINDOW} ids, with ${low} to ${high} unread`,
+			);
+
+			break;
+		}
+
+		const size = Math.min(ID_WALK_WINDOW, high - low + 1);
+		const first = ascending ? low : high - size + 1;
+		const page = await readMessagesById(
+			client,
+			peer,
+			Array.from({ length: size }, (_, index) => first + index),
+		);
+
+		if (ascending) {
+			low += size;
+		} else {
+			high -= size;
+		}
+
+		if (page._ === 'messages.messagesNotModified') {
+			continue;
+		}
+
+		const found = page.messages
+			.filter(
+				(message) =>
+					message._ !== 'messageEmpty' && getMarkedPeerId(message.peerId) === markedId,
+			)
+			.toSorted((a, b) => (ascending ? a.id - b.id : b.id - a.id));
+
+		messages.push(...found.slice(0, limit - messages.length));
+
+		for (const topic of page.topics) {
+			topics.set(topic.id, topic);
+		}
+
+		for (const chat of page.chats) {
+			chats.set(chat.id, chat);
+		}
+
+		for (const user of page.users) {
+			users.set(user.id, user);
+		}
+	}
+
+	return {
+		_: 'messages.messages',
+		messages: messages.toSorted((a, b) => b.id - a.id),
+		topics: [...topics.values()],
+		chats: [...chats.values()],
+		users: [...users.values()],
+	};
+}
+
 async function readMessages(
 	client: TelegramClient,
 	peer: tl.TypeInputPeer,
+	markedId: number,
 	request: TelegramMessagesFetchPayload,
+	learned?: ChatStore,
 ): Promise<tl.messages.TypeMessages> {
-	const options = { floodSleepThreshold: MESSAGES_FETCH_FLOOD_SLEEP };
-
 	if ('ids' in request) {
-		const id = request.ids.map((messageId): tl.TypeInputMessage => ({
-			_: 'inputMessageID',
-			id: messageId,
-		}));
+		return readMessagesById(client, peer, request.ids);
+	}
 
-		// Channel message ids are per channel, so they are read through the channel itself.
-		return isInputPeerChannel(peer)
-			? client.call({ _: 'channels.getMessages', channel: toInputChannel(peer), id }, options)
-			: client.call({ _: 'messages.getMessages', id }, options);
+	if (learned) {
+		return walkMessages(client, peer, markedId, request, learned.topMessage(markedId) ?? 0);
 	}
 
 	const { before, after, limit } = request;
@@ -148,19 +260,21 @@ async function readMessages(
 			minId: after ?? 0,
 			hash: Long.ZERO,
 		},
-		options,
+		{ floodSleepThreshold: MESSAGES_FETCH_FLOOD_SLEEP },
 	);
 }
 
 /**
  * Answers one `MESSAGES_FETCH` with the boxed `messages.Messages` Telegram
  * returned. A blocked chat is declined before anything calls Telegram, and a
- * peer the session's cache lacks is resolved through Telegram.
+ * peer the session's cache lacks is resolved through Telegram. A bot reads a
+ * page of history by walking its ids.
  */
 async function fetchMessages(
 	client: TelegramClient,
 	filter: Filter,
 	request: TelegramMessagesFetchPayload,
+	learned?: ChatStore,
 ): Promise<TelegramMessagesFetchResultPayload> {
 	const markedId = Number(request.peerId);
 
@@ -179,7 +293,10 @@ async function fetchMessages(
 			};
 		}
 
-		return { ok: true, messages: serialize(await readMessages(client, peer, request)) };
+		return {
+			ok: true,
+			messages: serialize(await readMessages(client, peer, markedId, request, learned)),
+		};
 	} catch (error) {
 		logger.warn(`Failed to fetch messages in ${request.peerId}: ${asError(error).message}`);
 		recordError(error);
@@ -417,10 +534,7 @@ async function refreshReference(
 		return { ok: false, reason: RequestFailureReason.SOURCE_CONTEXT_LOST };
 	}
 
-	const refetched = await readMessages(client, peer, {
-		peerId: source.peerId,
-		ids: [source.messageId],
-	});
+	const refetched = await readMessagesById(client, peer, [source.messageId]);
 	const message =
 		refetched._ === 'messages.messagesNotModified'
 			? undefined
@@ -604,12 +718,14 @@ async function fetchMedia(
  * @param client - The logged-in session.
  * @param filter - The producer's filter rules.
  * @param downloadDir - Where `MEDIA_FETCH` writes a file while it downloads.
+ * @param learned - The chats a bot learned, whose newest message bounds a page of history.
  * @returns The handlers, keyed by request opcode.
  */
 export function createTelegramRequests(
 	client: TelegramClient,
 	filter: Filter,
 	downloadDir: string,
+	learned?: ChatStore,
 ): Record<string, RequestHandler> {
 	return {
 		[TelegramOpcode.PROBE]: defineProbe(TelegramOpcode.PROBE_RESULT),
@@ -626,7 +742,7 @@ export function createTelegramRequests(
 						'telegram.chat.id': request.peerId,
 						'telegram.message.ids': 'ids' in request ? request.ids : undefined,
 					},
-					() => fetchMessages(client, filter, request),
+					() => fetchMessages(client, filter, request, learned),
 				),
 		}),
 		[TelegramOpcode.MEDIA_FETCH]: defineRequest({
