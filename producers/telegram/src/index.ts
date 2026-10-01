@@ -1,19 +1,23 @@
 import '@telecord/producer-otel/register';
 import './logging';
 
+import { join } from 'node:path';
+
+import { loadConfig, type ChatList } from '@telecord/producer-core/config';
 import { shutdown as shutdownTelemetry } from '@telecord/producer-otel';
 import { asError, createTaggedLogger } from '@telecord/producer-core';
-import { loadConfig } from '@telecord/producer-core/config';
 
 import {
 	TELEGRAM_CONFIG_SECTION,
 	TelegramConfigSchema,
 	TelegramSessionConfigSchema,
+	type TelegramAccountConfig,
 } from './config';
+import { logInAccount, resolveAccountDir } from './account';
+import ChatStore, { CHATS_FILE } from './chats';
 import listTelegramChats from './list-chats';
 import createTelegramClient from './client';
 import produce from './produce';
-import logIn from './login';
 
 const logger = createTaggedLogger('Telegram Producer');
 
@@ -32,17 +36,12 @@ async function runMode(args: readonly string[]): Promise<number> {
 	}
 
 	const config = loadConfig(TelegramSessionConfigSchema, { section: TELEGRAM_CONFIG_SECTION });
-	const client = createTelegramClient({
-		apiId: config.api_id,
-		apiHash: config.api_hash,
-		dataDir: config.data_dir,
-	});
 
 	try {
 		const output =
 			mode === 'login'
-				? await logIn(client, (prompt) => client.input(prompt))
-				: JSON.stringify(await listTelegramChats(client));
+				? (await logInAccount(config)).line
+				: JSON.stringify(await listAccountChats(config));
 
 		process.stdout.write(`${output}\n`);
 
@@ -54,8 +53,24 @@ async function runMode(args: readonly string[]): Promise<number> {
 		logger.error(mode === 'login' ? message : `Failed to list the Telegram chats: ${message}`);
 
 		return 1;
+	}
+}
+
+/** Lists the chats of the account's saved session, which for a bot are the ones it learned. */
+async function listAccountChats(config: TelegramAccountConfig): Promise<ChatList> {
+	const dir = await resolveAccountDir(config);
+	const client = createTelegramClient({
+		apiId: config.api_id,
+		apiHash: config.api_hash,
+		dataDir: dir,
+	});
+	const chats = config.bot_token === undefined ? undefined : new ChatStore(join(dir, CHATS_FILE));
+
+	try {
+		return await listTelegramChats(client, chats);
 	} finally {
 		await client.destroy();
+		chats?.close();
 	}
 }
 

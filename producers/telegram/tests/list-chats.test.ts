@@ -1,11 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import type { TelegramClient, tl } from '@mtcute/node';
 
 import { ChatListSchema } from '@telecord/producer-core/config';
 
-import { SELF, createOfflineClient, dialogOf, iterate, vectorChats } from './fixtures';
+import { SELF, createOfflineClient, dialogOf, iterate, seedPeers, vectorChats } from './fixtures';
 import { SNAPSHOT_MAX_PEERS } from '../src/snapshot';
 import listTelegramChats from '../src/list-chats';
+import ChatStore from '../src/chats';
 
 const FRIEND: tl.RawUser = { _: 'user', id: 777_000_222, firstName: 'Grace', lastName: 'Hopper' };
 
@@ -55,6 +56,29 @@ describe('listTelegramChats', () => {
 			],
 		});
 		expect(iterDialogs).toHaveBeenCalledWith({ archived: 'keep' });
+	});
+
+	it('lists the chats a bot learned from the copies its session cached, without listing dialogs', async () => {
+		const { forum, group } = vectorChats();
+		const iterDialogs = vi.spyOn(client, 'iterDialogs');
+		const learned = new ChatStore(':memory:');
+
+		onTestFinished(() => learned.close());
+		await logIn();
+		await seedPeers(client, { chats: [forum, group] });
+		learned.learn(Number(`-100${forum.id}`), 11);
+		learned.learn(-group.id);
+		// Learned from an update whose chat the session never cached, so it has no name to list.
+		learned.learn(-1_001_000_000_001);
+
+		expect(await listTelegramChats(client, learned)).toEqual({
+			platform: 'telegram',
+			chats: [
+				{ id: `-100${forum.id}`, name: forum.title, type: 'group' },
+				{ id: `-${group.id}`, name: group.title, type: 'group' },
+			],
+		});
+		expect(iterDialogs).not.toHaveBeenCalled();
 	});
 
 	it('points to login when no session is saved', async () => {

@@ -35,7 +35,10 @@ async function identify(
 		...(photo?._ === 'userProfilePhoto' && {
 			photo: { _: 'userProfilePhoto', photoId: photo.photoId.toString(), dcId: photo.dcId },
 		}),
-		requests: [TelegramOpcode.CUSTOM_EMOJIS_FETCH, TelegramOpcode.FORUM_TOPICS_FETCH],
+		// A bot cannot list a forum's topics, so it leaves the request undeclared.
+		requests: bot
+			? [TelegramOpcode.CUSTOM_EMOJIS_FETCH]
+			: [TelegramOpcode.CUSTOM_EMOJIS_FETCH, TelegramOpcode.FORUM_TOPICS_FETCH],
 		recovered,
 	};
 }

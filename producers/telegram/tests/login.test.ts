@@ -44,7 +44,10 @@ describe('logIn', () => {
 
 		startAsking(['phone', 'code', 'password']);
 
-		await expect(logIn(client, ask)).resolves.toBe('Logged in as Conformance (@conformance)');
+		await expect(logIn(client, ask)).resolves.toEqual({
+			userId: SELF.id,
+			line: 'Logged in as Conformance (@conformance)',
+		});
 		expect(ask.mock.calls).toEqual([
 			['Phone number (international format): '],
 			['Login code: '],
@@ -57,10 +60,31 @@ describe('logIn', () => {
 
 		startAsking([]);
 
-		await expect(logIn(client, ask)).resolves.toBe(
-			'Already logged in as Conformance (@conformance)',
-		);
+		await expect(logIn(client, ask)).resolves.toEqual({
+			userId: SELF.id,
+			line: 'Already logged in as Conformance (@conformance)',
+		});
 		expect(ask).not.toHaveBeenCalled();
+	});
+
+	it('logs a bot in with its token, without prompting', async () => {
+		const ask = vi.fn(async () => '');
+		const start = startAsking([]);
+
+		await expect(logIn(client, ask, '4242:token')).resolves.toEqual({
+			userId: SELF.id,
+			line: 'Logged in as Conformance (@conformance)',
+		});
+		expect(start).toHaveBeenCalledWith({ botToken: '4242:token' });
+		expect(ask).not.toHaveBeenCalled();
+	});
+
+	it('names the bot token when Telegram refuses it', async () => {
+		startAsking([], new tl.RpcError(400, 'ACCESS_TOKEN_INVALID'));
+
+		await expect(logIn(client, async () => '', '4242:token')).rejects.toThrow(
+			/^Telegram login failed at the bot token step: .*ACCESS_TOKEN_INVALID/,
+		);
 	});
 
 	it('names the step a refused login failed at', async () => {

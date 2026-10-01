@@ -24,6 +24,7 @@ describe('the Telegram config', () => {
 		).toEqual({
 			api_id: 'TELEGRAM_API_ID',
 			api_hash: 'TELEGRAM_API_HASH',
+			bot_token: 'TELEGRAM_BOT_TOKEN',
 			data_dir: 'DATA_DIR',
 			'ingest.url': 'INGEST_URL',
 			'ingest.api_key': 'INGEST_API_KEY',

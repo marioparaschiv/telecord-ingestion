@@ -1,4 +1,4 @@
-import type { Dialog, TelegramClient, tl } from '@mtcute/node';
+import { parseMarkedPeerId, type Dialog, type TelegramClient, type tl } from '@mtcute/node';
 
 import {
 	asError,
@@ -16,7 +16,17 @@ import {
 import { CHATS_PART_MAX_CHATS } from '@telecord/ingest-client';
 import { traceRequest } from '@telecord/producer-otel';
 
-import { fetchChat, fetchFullChat, isComplete, markedIdOf, subjectOfRaw } from './peers';
+import type ChatStore from './chats';
+
+import {
+	fetchChat,
+	fetchFullChat,
+	fetchFullUser,
+	isComplete,
+	markedIdOf,
+	subjectOfMarkedId,
+	subjectOfRaw,
+} from './peers';
 import { serialize, serializeVector } from './tl';
 
 /** Telegram's cap on the topics one `messages.getForumTopics` page lists. */
@@ -186,13 +196,89 @@ async function completeChat(client: TelegramClient, chat: tl.TypeChat): Promise<
 	return (await fetchFullChat(client, markedId)) ?? chat;
 }
 
-/** Each chat the dialog walk lists, and then each one the re-check keeps, with its newest message. */
+type SnapshotChat = { raw: Dialog['peer']['raw'] | tl.TypeChat; topMessage?: TopMessage };
+
+/** A learned chat as Telegram has it now, or undefined when the bot can no longer reach it. */
+async function fetchLearned(
+	client: TelegramClient,
+	peerId: number,
+): Promise<tl.RawUser | tl.TypeChat | undefined> {
+	const [kind, id] = parseMarkedPeerId(peerId);
+
+	if (kind === 'user') {
+		const user = await fetchFullUser(client, id);
+
+		return user?._ === 'user' ? user : undefined;
+	}
+
+	const chat = await fetchChat(client, peerId);
+
+	return chat && isReachable(chat) ? chat : undefined;
+}
+
+/**
+ * Each chat a bot learned, as Telegram has it now, with the newest message seen in it. A chat
+ * the bot can no longer reach is forgotten.
+ */
+async function* learnedChats(
+	client: TelegramClient,
+	filter: Filter,
+	learned: ChatStore,
+): AsyncGenerator<SnapshotChat> {
+	for (const { peerId, topMessage } of learned.all()) {
+		const [kind] = parseMarkedPeerId(peerId);
+
+		// A user or basic group is typed by its id alone, so a blocked one is never fetched.
+		if (kind !== 'channel' && !isAllowed(filter, await subjectOfMarkedId(client, peerId))) {
+			continue;
+		}
+
+		let raw: Awaited<ReturnType<typeof fetchLearned>>;
+
+		try {
+			raw = await fetchLearned(client, peerId);
+		} catch (error) {
+			logger.warn(
+				`Failed to fetch chat ${peerId}, leaving it out: ${asError(error).message}`,
+			);
+
+			continue;
+		}
+
+		if (!raw) {
+			logger.info(`Forgot chat ${peerId}, which the bot can no longer reach`);
+			learned.forget(peerId);
+
+			continue;
+		}
+
+		if (isAllowed(filter, subjectOfRaw(raw))) {
+			yield {
+				raw,
+				topMessage:
+					topMessage > 0 ? { peerId: String(peerId), messageId: topMessage } : undefined,
+			};
+		}
+	}
+}
+
+/**
+ * Each chat the dialog walk lists, and then each one the re-check keeps, with its newest message.
+ * A bot has no dialogs to walk, so its learned chats are listed instead.
+ */
 async function* snapshotChats(
 	client: TelegramClient,
 	filter: Filter,
 	named: Set<number>,
 	lastNamed: ReadonlySet<number>,
-): AsyncGenerator<{ raw: Dialog['peer']['raw'] | tl.TypeChat; topMessage?: TopMessage }> {
+	learned?: ChatStore,
+): AsyncGenerator<SnapshotChat> {
+	if (learned) {
+		yield* learnedChats(client, filter, learned);
+
+		return;
+	}
+
 	for await (const dialog of client.iterDialogs({ archived: 'keep' })) {
 		const { peer } = dialog;
 
@@ -228,12 +314,16 @@ async function* snapshotChats(
  *
  * Forums are walked one after another, since Telegram flood-limits bursts of
  * topic requests, and each part is yielded as soon as it is complete.
+ *
+ * A bot's parts are built from its learned chats. It cannot list a forum's
+ * topics, so its forums are batched with its other chats and carry no pages.
  */
 async function* snapshotParts(
 	client: TelegramClient,
 	filter: Filter,
 	lastNamed: ReadonlySet<number>,
 	named: Set<number>,
+	learned?: ChatStore,
 ): AsyncGenerator<TelegramChatsPartFields> {
 	let chats: tl.TypeChat[] = [];
 	let users: tl.TypeUser[] = [];
@@ -241,7 +331,13 @@ async function* snapshotParts(
 	let peerCount = 0;
 	let topicCount = 0;
 
-	for await (const { raw, topMessage } of snapshotChats(client, filter, named, lastNamed)) {
+	for await (const { raw, topMessage } of snapshotChats(
+		client,
+		filter,
+		named,
+		lastNamed,
+		learned,
+	)) {
 		if (++peerCount > SNAPSHOT_MAX_PEERS) {
 			throw new Error(`The account has more than ${SNAPSHOT_MAX_PEERS} chats`);
 		}
@@ -251,7 +347,7 @@ async function* snapshotParts(
 		} else {
 			const chat = await completeChat(client, raw);
 
-			if (chat._ === 'channel' && chat.forum) {
+			if (chat._ === 'channel' && chat.forum && !learned) {
 				const pages = await loadTopicPages(client, chat);
 
 				topicCount += pages.reduce((total, page) => total + page.topics.length, 0);
@@ -303,16 +399,21 @@ async function* snapshotParts(
  *
  * @param client - The logged-in session.
  * @param filter - The producer's filter rules.
+ * @param learned - The chats a bot learned, which stand in for the dialogs Telegram never lists it.
  * @returns The handler.
  */
-export function createTelegramSnapshot(client: TelegramClient, filter: Filter): RequestHandler {
+export function createTelegramSnapshot(
+	client: TelegramClient,
+	filter: Filter,
+	learned?: ChatStore,
+): RequestHandler {
 	/** The groups and channels, by marked id, the last snapshot to run to its end named. */
 	let lastNamed: ReadonlySet<number> = new Set();
 
 	async function* parts(): AsyncGenerator<TelegramChatsPartFields> {
 		const named = new Set<number>();
 
-		yield* snapshotParts(client, filter, lastNamed, named);
+		yield* snapshotParts(client, filter, lastNamed, named, learned);
 
 		lastNamed = new Set([...named].filter((markedId) => markedId < 0));
 	}

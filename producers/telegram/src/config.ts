@@ -27,10 +27,20 @@ export const TelegramConfigSchema = z.object({
 		secret: true,
 		description: 'The API hash of your app at https://my.telegram.org.',
 	}),
+	bot_token: z
+		.string()
+		.regex(/^\d+:[\w-]+$/)
+		.optional()
+		.meta({
+			env: 'TELEGRAM_BOT_TOKEN',
+			secret: true,
+			description:
+				'The token of a bot from @BotFather. Set it to connect that bot instead of a user account.',
+		}),
 	data_dir: z.string().min(1).default('/data').meta({
 		env: 'DATA_DIR',
 		description:
-			'Holds the SQLite session (auth keys, the peer cache and the update state) and the outbox.',
+			'Holds a directory per account: its SQLite session (auth keys, the peer cache and the update state), its outbox and the chats a bot learned.',
 	}),
 	ingest: IngestConfigSchema,
 	filter: createFilterConfigSchema(TELEGRAM_FILTER_FIELDS),
@@ -43,3 +53,9 @@ export type TelegramConfig = z.output<typeof TelegramConfigSchema>;
 export const TelegramSessionConfigSchema = TelegramConfigSchema.extend({
 	ingest: IngestConfigSchema.partial(),
 });
+
+/** What names an account and opens its session, in either table. */
+export type TelegramAccountConfig = Pick<
+	TelegramConfig,
+	'api_id' | 'api_hash' | 'bot_token' | 'data_dir'
+>;

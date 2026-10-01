@@ -25,6 +25,8 @@ import {
 import telegramVectors from '@telecord/ingest-client/vectors/telegram.json' with { type: 'json' };
 import { Outbox, resolveFilter, type Filter } from '@telecord/producer-core';
 
+import type ChatStore from '../src/chats';
+
 import { createTelegramProducer } from '../src/producer';
 import { TelegramConfigSchema } from '../src/config';
 import { TELEGRAM_FORWARD } from '../src/filter';
@@ -213,9 +215,13 @@ export type Harness = {
  * greets its connection up to `READY`.
  *
  * @param filter - The producer's filter rules.
+ * @param chats - The learned chats of a bot session, which the caller closes.
  * @returns The running harness.
  */
-export async function startHarness(filter: Filter = DEFAULT_FILTER): Promise<Harness> {
+export async function startHarness(
+	filter: Filter = DEFAULT_FILTER,
+	chats?: ChatStore,
+): Promise<Harness> {
 	const server = await FakeIngestServer.start();
 	const client = await createOfflineClient();
 
@@ -229,6 +235,7 @@ export async function startHarness(filter: Filter = DEFAULT_FILTER): Promise<Har
 		url: server.url,
 		apiKey: bindings.key,
 		outbox,
+		chats,
 		window: 500,
 		downloadDir: downloads.path,
 		onFatal: (reason) => {
