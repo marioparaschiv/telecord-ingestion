@@ -1,8 +1,9 @@
-import { Long, PeersIndex, RawUpdateInfo, User, getMarkedPeerId, type tl } from '@mtcute/node';
+import { Long, PeersIndex, RawUpdateInfo, getMarkedPeerId, type tl } from '@mtcute/node';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
 	TelegramChatsPart,
+	TelegramForumTopicsFetchResult,
 	TelegramMessagesFetchResult,
 	TelegramOpcode,
 } from '@telecord/ingest-client/telegram';
@@ -19,7 +20,6 @@ import {
 	vectorUpdates,
 	type Harness,
 } from './fixtures';
-import identify from '../src/identify';
 import ChatStore from '../src/chats';
 
 const ALLOW_ALL: Filter = { rules: [], fallback: 'allow' };
@@ -387,14 +387,39 @@ describe('a page of history read by a bot', () => {
 	});
 });
 
-describe('a bot IDENTIFY', () => {
-	it('leaves FORUM_TOPICS_FETCH undeclared, since a bot cannot list topics', async () => {
+describe('the forum topics a bot fetches', () => {
+	it('reads the topics the request names by id, without listing the forum', async () => {
 		await startBot();
-		vi.spyOn(harness.client, 'getMe').mockResolvedValue(new User({ ...SELF, bot: true }));
 
-		expect(await identify(harness.client, true)).toMatchObject({
-			bot: true,
-			requests: [TelegramOpcode.CUSTOM_EMOJIS_FETCH],
+		const { forum, topics } = vectorChats();
+		const peerId = String(getMarkedPeerId(forum.id, 'channel'));
+		const call = vi.spyOn(harness.client, 'call').mockResolvedValue(topics);
+
+		await seedPeers(harness.client, { chats: [forum] });
+
+		const result = TelegramForumTopicsFetchResult.parse(
+			await request(TelegramOpcode.FORUM_TOPICS_FETCH, { peerId, topicIds: [7, 9] }),
+		);
+
+		expect(result.topics?.map(decodeObject)).toEqual([topics]);
+		expect(call).toHaveBeenCalledExactlyOnceWith(
+			expect.objectContaining({ _: 'messages.getForumTopicsByID', topics: [7, 9] }),
+		);
+	});
+
+	it('declines a request that names no topic, since a bot cannot list them', async () => {
+		await startBot();
+
+		const { forum } = vectorChats();
+		const peerId = String(getMarkedPeerId(forum.id, 'channel'));
+		const call = vi.spyOn(harness.client, 'call');
+
+		await seedPeers(harness.client, { chats: [forum] });
+
+		expect(await request(TelegramOpcode.FORUM_TOPICS_FETCH, { peerId })).toEqual({
+			ok: false,
+			message: `A bot reads the topics of forum ${peerId} by id, and none was named`,
 		});
+		expect(call).not.toHaveBeenCalled();
 	});
 });

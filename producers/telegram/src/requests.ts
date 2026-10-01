@@ -382,16 +382,27 @@ async function fetchCustomEmojis(
  * Answers one `FORUM_TOPICS_FETCH` with every `messages.forumTopics` page of the
  * forum, paged as a chat snapshot pages them. A blocked forum is declined before
  * anything calls Telegram.
+ *
+ * Telegram refuses a bot `messages.getForumTopics`, so a bot answers with the
+ * one page `messages.getForumTopicsByID` returns for the topics the request names.
  */
 async function fetchForumTopics(
 	client: TelegramClient,
 	filter: Filter,
-	{ peerId }: TelegramForumTopicsFetchPayload,
+	{ peerId, topicIds }: TelegramForumTopicsFetchPayload,
+	learned?: ChatStore,
 ): Promise<TelegramForumTopicsFetchResultPayload> {
 	const markedId = Number(peerId);
 
 	if (!(await isChatAllowed(client, filter, markedId))) {
 		return { ok: false, reason: RequestFailureReason.FILTERED };
+	}
+
+	if (learned && !topicIds) {
+		return {
+			ok: false,
+			message: `A bot reads the topics of forum ${peerId} by id, and none was named`,
+		};
 	}
 
 	try {
@@ -405,7 +416,9 @@ async function fetchForumTopics(
 			};
 		}
 
-		const pages = await forumTopicPages(client, peer);
+		const pages = topicIds
+			? [await client.call({ _: 'messages.getForumTopicsByID', peer, topics: topicIds })]
+			: await forumTopicPages(client, peer);
 
 		if (pages.length > FORUM_TOPICS_MAX_PAGES) {
 			return {
@@ -807,7 +820,7 @@ export function createTelegramRequests(
 						'telecord.request': 'FORUM_TOPICS_FETCH',
 						'telegram.chat.id': request.peerId,
 					},
-					() => fetchForumTopics(client, filter, request),
+					() => fetchForumTopics(client, filter, request, learned),
 				),
 		}),
 	};
